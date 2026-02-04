@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Dict, Any, TypedDict, List, Optional
+import re
 
 from docx import Document
 from langgraph.graph import StateGraph, END
