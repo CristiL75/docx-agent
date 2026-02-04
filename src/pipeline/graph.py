@@ -162,6 +162,8 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
             value = normalized_data.get(normalize_key(key))
             if value is None:
                 continue
+            if isinstance(value, list) and any(isinstance(v, dict) for v in value):
+                continue
             if fill_text_container(
                 anchor["_container"],
                 placeholder_span["start"],

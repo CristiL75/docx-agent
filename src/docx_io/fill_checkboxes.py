@@ -38,8 +38,9 @@ def _line_spans(text: str) -> List[Tuple[int, int, str]]:
 
 
 def _get_mapping_value(text: str, data: Dict[str, Any], mapping: Dict[str, str]) -> Any:
-    label = text.splitlines()[0].strip(" :\t") if text.splitlines() else text.strip(" :\t")
-    key = mapping.get(label, label)
+    full_label = text.strip(" :\t")
+    label = text.splitlines()[0].strip(" :\t") if text.splitlines() else full_label
+    key = mapping.get(full_label) or mapping.get(label, label)
     value = data.get(key)
     if value is None:
         value = data.get(normalize_key(key))

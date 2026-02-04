@@ -86,11 +86,13 @@ def _infer_field_type(anchor: Dict[str, object]) -> str:
     kind = str(anchor.get("kind") or "")
     placeholder_span = anchor.get("placeholder_span") or {}
     placeholder = str(placeholder_span.get("text", ""))
-    text = _normalize_text(" ".join([label, nearby]))
+    norm_label = _normalize_text(label)
+    norm_nearby = _normalize_text(nearby)
+    text = norm_label if len(norm_label) >= 5 else _normalize_text(" ".join([label, nearby]))
 
-    if kind == "checkbox" or "|_|" in label or "☐" in label or "[ ]" in label:
+    if kind in {"checkbox", "checkbox_group"} or "|_|" in label or "☐" in label or "[ ]" in label:
         return "CHECKBOX_GROUP"
-    if kind == "table":
+    if "tabel" in text or "lista" in text:
         return "TABLE"
     if "/" in placeholder or "data" in text:
         return "DATE"
@@ -98,35 +100,42 @@ def _infer_field_type(anchor: Dict[str, object]) -> str:
         return "PERCENT"
     if any(x in text for x in ("suma", "lei", "valoare", "tva", "taxa")):
         return "MONEY"
-    if any(x in text for x in ("numar", "nr", "cif", "cnp", "cod", "serie", "bi", "ci")):
-        return "NUMBER"
     if any(x in text for x in ("adresa", "sediu", "domiciliu")):
         return "ADDRESS"
     if any(x in text for x in ("subsemnat", "reprezentant", "imputernicit", "semnatar", "dl", "dna", "functie")):
         return "PERSON"
-    if any(x in text for x in ("operator", "ofertant", "autoritate", "societate", "s.c", "achizitor")):
+    if any(x in text for x in ("banca", "societate", "autoritate", "operator", "ofertant", "achizitor", "contractant", "beneficiar")):
         return "ORG"
+    if "cpv" in text:
+        return "NUMBER"
+    if any(x in text for x in ("numar", "nr", "cif", "cnp", "cod", "serie", "bi", "ci")):
+        return "NUMBER"
     return "TEXT"
 
 
 def _infer_key_type(key: str) -> str:
     t = _normalize_text(key)
+    if "tabel" in t or "lista" in t:
+        return "TABLE"
     if "data" in t:
         return "DATE"
     if any(x in t for x in ("tva", "suma", "valoare", "lei")):
         return "MONEY"
     if "%" in key or "procent" in t:
         return "PERCENT"
+    if "cpv" in t:
+        return "NUMBER"
     if any(x in t for x in ("numar", "nr", "cif", "cnp", "cod", "serie", "bi", "ci")):
         return "NUMBER"
     if any(x in t for x in ("adresa", "sediu", "domiciliu")):
         return "ADDRESS"
+    if any(x in t for x in ("operator", "ofertant", "autoritate", "societate", "achizitor", "s.c", "contractant", "beneficiar", "banca", "asigur")):
+        if "denumire" in t or "nume" in t:
+            return "ORG"
     if any(x in t for x in ("reprezentant", "imputernicit", "semnatar", "nume", "functie", "director")):
         return "PERSON"
     if any(x in t for x in ("operator", "ofertant", "autoritate", "societate", "achizitor", "s.c")):
         return "ORG"
-    if any(x in t for x in ("tabel", "lista")):
-        return "TABLE"
     return "TEXT"
 
 
@@ -228,6 +237,17 @@ def _heuristic_mapping(
         if not norm_label and not norm_nearby:
             continue
         field_type = _infer_field_type(anchor)
+        if norm_label == "data":
+            exact_key = next((k for k in data_keys if _normalize_text(k) == "data"), None)
+            if exact_key:
+                mapping[anchor_id] = {
+                    "label_text": label,
+                    "json_key": exact_key,
+                    "score": 100.0,
+                    "ambiguous": False,
+                    "field_type": field_type,
+                }
+                continue
         label_tags = set(_infer_tags_from_text(label + " " + nearby))
         filtered_keys = [k for k in data_keys if (not label_tags) or (label_tags & set(key_tags.get(k, [])))]
         filtered_norm_keys = [_normalize_text(k) for k in filtered_keys]
@@ -271,7 +291,11 @@ def _heuristic_mapping(
                     continue
             if field_type == "PERSON" and key_type != "PERSON":
                 continue
-            if field_type == "ORG" and key_type == "PERSON":
+            if field_type == "ORG" and key_type != "ORG":
+                continue
+            if field_type == "ADDRESS" and key_type != "ADDRESS":
+                continue
+            if field_type not in {"TEXT", "CHECKBOX_GROUP"} and not _type_compatible(field_type, key_type):
                 continue
 
             score = _score_candidate(sim, field_type, key_type)

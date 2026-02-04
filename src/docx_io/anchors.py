@@ -8,7 +8,34 @@ from src.docx_io.traverse import TextContainer, Location
 PLACEHOLDER_UNDERSCORES = re.compile(r"_{4,}")
 PLACEHOLDER_DOTS = re.compile(r"\.{4,}")
 PLACEHOLDER_DATE = re.compile(r"_{4,}/_{4,}/_{4,}")
-CHECKBOX_RE = re.compile(r"(\[\s\]|\[x\]|\[X\]|☐|☑)")
+CHECKBOX_RE = re.compile(r"(\|_\||\[\s\]|\[x\]|\[X\]|☐|☑)")
+
+
+def _line_spans(text: str) -> List[Tuple[int, int, str]]:
+    spans: List[Tuple[int, int, str]] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        start = cursor
+        end = cursor + len(line)
+        spans.append((start, end, line.rstrip("\n")))
+        cursor = end
+    if not spans:
+        spans.append((0, len(text), text))
+    return spans
+
+
+def _find_checkbox_spans(line: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    idx = 0
+    while True:
+        pos = line.find("|_|", idx)
+        if pos == -1:
+            break
+        spans.append((pos, pos + 3))
+        idx = pos + 3
+    for match in re.finditer(r"\[\s\]|\[x\]|\[X\]|☐|☑", line):
+        spans.append((match.start(), match.end()))
+    return spans
 
 
 def _location_to_dict(location: Location) -> Dict[str, object]:
@@ -131,6 +158,28 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
             anchor_id += 1
 
         if CHECKBOX_RE.search(text):
+            options: List[Dict[str, object]] = []
+            for start, end, line in _line_spans(text):
+                if not CHECKBOX_RE.search(line):
+                    continue
+                spans = _find_checkbox_spans(line)
+                option_text = (
+                    line.replace("|_|", "")
+                    .replace("[ ]", "")
+                    .replace("[x]", "")
+                    .replace("[X]", "")
+                    .replace("☐", "")
+                    .replace("☑", "")
+                    .strip()
+                )
+                for s, e in spans:
+                    options.append(
+                        {
+                            "text": option_text,
+                            "span": {"start": start + s, "end": start + e},
+                        }
+                    )
+
             anchors.append(
                 {
                     "anchor_id": f"A{anchor_id}",
@@ -138,7 +187,8 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
                     "nearby_text": text[:200],
                     "placeholder_span": None,
                     "location": _location_to_dict(container.location),
-                    "kind": "checkbox",
+                    "kind": "checkbox_group",
+                    "options": options,
                     "container": container,
                 }
             )

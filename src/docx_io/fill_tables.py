@@ -122,20 +122,26 @@ def _fill_table(table: Table, rows_data: List[Dict[str, Any]]) -> int:
 
 def fill_tables(doc: Document, data: Dict[str, Any]) -> int:
     filled = 0
-    services_rows = data.get("Tabel - principalele servicii in ultimii 3 ani")
-    subcontract_rows = data.get("Tabel - subcontractanti si parti din contract")
-
-    prev_text = None
-    for block in doc.paragraphs:
-        if block.text.strip():
-            prev_text = block.text
-            break
+    list_data = {k: v for k, v in data.items() if isinstance(v, list) and any(isinstance(i, dict) for i in v)}
 
     for table in doc.tables:
-        if isinstance(services_rows, list) and _is_services_table(table, prev_text):
-            filled += _fill_table(table, services_rows)
+        if not table.rows:
             continue
-        if isinstance(subcontract_rows, list) and _is_subcontract_table(table):
-            filled += _fill_table(table, subcontract_rows)
+        header_row = table.rows[0]
+        headers = _header_map(header_row)
+        if not headers:
+            continue
+        matched = False
+        for key, rows in list_data.items():
+            if not rows:
+                continue
+            col_map = _match_columns(headers, rows[0])
+            if not col_map:
+                continue
+            filled += _fill_table(table, rows)
+            matched = True
+            break
+        if matched:
+            continue
 
     return filled
