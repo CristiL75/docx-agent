@@ -26,8 +26,27 @@ def _infer_tags_from_text(text: str) -> List[str]:
         tags.append("service")
     if any(x in t for x in ("adresa", "sediu", "domiciliu")):
         tags.append("address")
+    if any(x in t for x in ("banca", "asigur", "parafata")):
+        tags.append("bank")
     if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
         tags.append("entity")
+    if any(
+        x in t
+        for x in (
+            "reprezentant",
+            "imputernicit",
+            "semnatar",
+            "persoana",
+            "nume",
+            "functie",
+            "director",
+            "calitate",
+            "dl",
+            "dna",
+        )
+    ):
+        tags.append("person")
+        tags.append("role")
     if any(x in t for x in ("procedura", "contract", "achizitie")):
         tags.append("process")
     return tags
