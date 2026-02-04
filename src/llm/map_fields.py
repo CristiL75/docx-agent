@@ -204,9 +204,12 @@ def _score_candidate(
     text_similarity: float,
     field_type: str,
     key_type: str,
+    label: str,
+    nearby: str,
+    key: str,
 ) -> float:
     type_score = 1.0 if _type_compatible(field_type, key_type) else 0.0
-    context = _context_score(field_type, key_type)
+    context = _context_score(label, nearby, key)
     return 0.7 * text_similarity + 0.2 * type_score + 0.1 * context
 
 
@@ -319,7 +322,7 @@ def _heuristic_mapping(
             if field_type not in {"TEXT", "CHECKBOX_GROUP"} and not _type_compatible(field_type, key_type):
                 continue
 
-            score = _score_candidate(sim, field_type, key_type)
+            score = _score_candidate(sim, field_type, key_type, label, nearby, key)
             if score > best_score:
                 best_score = score
                 best_key = key
