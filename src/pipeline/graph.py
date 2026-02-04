@@ -25,6 +25,7 @@ class State(TypedDict):
     anchor_clusters: List[Dict[str, Any]]
     field_spans: List[Dict[str, Any]]
     span_mapping: Dict[str, Any]
+    suspicious_fills: List[Dict[str, Any]]
     data_norm: Dict[str, Any]
     mapping_heuristic: Dict[str, Dict[str, Any]]
     mapping_llm: Dict[str, Any]
@@ -74,9 +75,14 @@ def _extract_anchors_node(state: State, artifacts_dir: Path) -> State:
     return state
 
 
-def _map_spans_node(state: State, artifacts_dir: Path, model_name: str) -> State:
-    model = HFModel(model_name=model_name)
-    result = map_field_spans(state.get("field_spans", []), state.get("data_norm", {}), model=model)
+def _map_spans_node(state: State, artifacts_dir: Path, model_name: str, seed: int, llm_enabled: bool) -> State:
+    model = HFModel(model_name=model_name, seed=seed) if llm_enabled else None
+    result = map_field_spans(
+        state.get("field_spans", []),
+        state.get("data_norm", {}),
+        model=model,
+        seed=seed,
+    )
     state["span_mapping"] = result
     write_report(artifacts_dir / "span_mapping.json", result)
     return state
@@ -139,6 +145,19 @@ def _validate_merge_node(
 
 def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
     if dry_run:
+        doc = Document(str(state["template_path"]))
+        filled_text, suspicious_fills = fill_spans_in_docx(
+            doc,
+            state.get("field_spans", []),
+            state.get("span_mapping", {}).get("mapping", {}),
+            state.get("data_norm", {}),
+            state.get("span_mapping", {}).get("computed_values", {}),
+            state.get("span_mapping", {}).get("expected_types", {}),
+        )
+        state["actions"] = state.get("actions", []) + [
+            {"type": "summary", "filled_text": filled_text, "filled_checkboxes": 0, "filled_tables": 0}
+        ]
+        state["suspicious_fills"] = suspicious_fills
         return state
 
     doc = Document(str(state["template_path"]))
@@ -170,7 +189,7 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
     table_anchors = [a for a in state["anchors"] if a.get("kind") == "table" or _infer_field_type(a) == "TABLE"]
     text_anchors = [a for a in state["anchors"] if a not in checkbox_anchors and a not in table_anchors]
 
-    filled_text = fill_spans_in_docx(
+    filled_text, suspicious_fills = fill_spans_in_docx(
         doc,
         state.get("field_spans", []),
         state.get("span_mapping", {}).get("mapping", {}),
@@ -231,6 +250,7 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
         if key_type in {"DATE", "DATE_PARTS"} or key.strip().lower().startswith("data"):
             raise SystemExit("Catre mapped to DATE key")
     state["actions"] = actions
+    state["suspicious_fills"] = suspicious_fills
     return state
 
 
@@ -289,6 +309,8 @@ def _report_node(state: State, artifacts_dir: Path) -> State:
         for s in span_mapping.get("unmatched", [])
     ]
     report["type_mismatch_prevented"] = span_mapping.get("type_mismatch_prevented", [])
+    report["unmatched_slots"] = report.get("unmatched_spans", [])
+    report["suspicious_fills"] = state.get("suspicious_fills", [])
     report["conflicts_found"] = int(state.get("mapping_stats", {}).get("conflicts_found", 0))
     report["repairs_made"] = int(state.get("mapping_stats", {}).get("repairs_made", 0))
     report["role_clusters_detected"] = int(state.get("mapping_stats", {}).get("role_clusters_detected", 0))
@@ -309,6 +331,8 @@ def run_pipeline(
     artifacts_dir: Path,
     dry_run: bool = False,
     strict: bool = False,
+    seed: int = 42,
+    llm_enabled: bool = True,
     heuristic_threshold: int = 90,
     llm_threshold: float = 0.15,
     prioritize_llm: bool = True,
@@ -325,6 +349,7 @@ def run_pipeline(
         "anchor_clusters": [],
         "field_spans": [],
         "span_mapping": {},
+        "suspicious_fills": [],
         "data_norm": {},
         "mapping_heuristic": {},
         "mapping_llm": {},
@@ -341,7 +366,7 @@ def run_pipeline(
     graph.add_node("extract_anchors_node", lambda s: _extract_anchors_node(s, artifacts_dir))
     graph.add_node("heuristic_map_node", lambda s: _heuristic_map_node(s, artifacts_dir, heuristic_threshold))
     graph.add_node("llm_map_ambiguous_node", lambda s: _llm_map_ambiguous_node(s, artifacts_dir, model_name))
-    graph.add_node("map_spans_node", lambda s: _map_spans_node(s, artifacts_dir, model_name))
+    graph.add_node("map_spans_node", lambda s: _map_spans_node(s, artifacts_dir, model_name, seed, llm_enabled))
     graph.add_node(
         "validate_merge_node",
         lambda s: _validate_merge_node(

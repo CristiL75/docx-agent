@@ -17,6 +17,8 @@ from src.validate import (
     is_personish,
     is_role_title,
     is_addressish,
+    infer_slot_type,
+    value_matches_type,
 )
 
 
@@ -26,6 +28,63 @@ def _normalize_text(value: str) -> str:
     return " ".join(text.split())
 
 
+def _tokens(value: str) -> List[str]:
+    return [t for t in re.split(r"\W+", _normalize_text(value)) if t]
+
+
+def _jaccard(a: List[str], b: List[str]) -> float:
+    if not a or not b:
+        return 0.0
+    sa, sb = set(a), set(b)
+    return len(sa & sb) / max(1, len(sa | sb))
+
+
+def _candidate_scores(
+    slot: Dict[str, Any],
+    data_keys: List[str],
+    data_norm: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    context = f"{slot.get('left_context','')} {slot.get('right_context','')}"
+    norm_context = _normalize_text(context)
+    context_tokens = _tokens(context)
+
+    boosts = []
+    if "catre" in norm_context:
+        boosts.append(("catre", 0.2))
+        boosts.append(("autoritate", 0.2))
+    if "cif" in norm_context:
+        boosts.append(("cif", 0.3))
+    if "cod cpv" in norm_context or "cpv" in norm_context:
+        boosts.append(("cpv", 0.3))
+    if re.search(r"\bnr\b", norm_context):
+        boosts.append(("nr", 0.15))
+        boosts.append(("numar", 0.15))
+    if "valabila" in norm_context and "pana la data" in norm_context:
+        boosts.append(("data expir", 0.2))
+        boosts.append(("valabil", 0.2))
+        boosts.append(("durata", 0.15))
+
+    results: List[Dict[str, Any]] = []
+    for key in data_keys:
+        value = data_norm.get(key)
+        if isinstance(value, (list, dict)):
+            continue
+        if not value_matches_type(value, infer_slot_type(slot)):
+            continue
+        norm_key = _normalize_text(key)
+        key_tokens = _tokens(key)
+        score_j = _jaccard(context_tokens, key_tokens)
+        score_f = fuzz.token_set_ratio(norm_context, norm_key) / 100.0
+        score = 0.55 * score_f + 0.45 * score_j
+        for token, boost in boosts:
+            if token in norm_key:
+                score += boost
+        results.append({"key": key, "score": float(score)})
+
+    results.sort(key=lambda r: (-r["score"], r["key"]))
+    return results[:5]
+
+
 def _expected_types_for_paragraph(text: str, spans: List[Dict[str, Any]]) -> Dict[str, str]:
     norm = _normalize_text(text)
     expected: Dict[str, str] = {}
@@ -33,8 +92,8 @@ def _expected_types_for_paragraph(text: str, spans: List[Dict[str, Any]]) -> Dic
     if "durata de" in norm and "zile" in norm and "pana la data" in norm:
         spans_sorted = sorted(spans, key=lambda s: s.get("start_char", 0))
         if len(spans_sorted) >= 2:
-            expected[spans_sorted[0]["span_id"]] = "DURATION_DAYS"
-            expected[spans_sorted[1]["span_id"]] = "DATE_UNTIL"
+            expected[spans_sorted[0]["span_id"]] = "NUMBER"
+            expected[spans_sorted[1]["span_id"]] = "DATE"
 
     for span in spans:
         sid = span.get("span_id")
@@ -58,9 +117,9 @@ def _expected_types_for_paragraph(text: str, spans: List[Dict[str, Any]]) -> Dic
     return expected
 
 
-def _type_check(expected_type: Optional[str], value: Any) -> bool:
+def _type_check(expected_type: Optional[str], value: Any, slot: Dict[str, Any]) -> bool:
     if expected_type is None:
-        return True
+        return value_matches_type(value, infer_slot_type(slot))
     if expected_type == "DURATION_DAYS":
         return is_numericish(value) and not is_date(value)
     if expected_type == "DATE_UNTIL":
@@ -75,7 +134,7 @@ def _type_check(expected_type: Optional[str], value: Any) -> bool:
         return is_role_title(value)
     if expected_type == "ADDRESSEE":
         return (is_orgish(value) or is_addressish(value)) and not is_date(value)
-    return True
+    return value_matches_type(value, expected_type)
 
 
 def _parse_date(value: Any) -> Optional[datetime]:
@@ -89,31 +148,45 @@ def _parse_date(value: Any) -> Optional[datetime]:
     return None
 
 
-def _llm_candidates(model: HFModel, span: Dict[str, Any], data_keys: List[str]) -> List[Dict[str, Any]]:
+def _llm_choose_key(
+    model: HFModel,
+    span: Dict[str, Any],
+    slot_type: str,
+    candidate_keys: List[str],
+) -> Optional[Dict[str, Any]]:
     if not model or not model.available():
-        return []
+        return None
+    bad_examples = [
+        "Avoid DATE for MONEY/NUMBER slots",
+        "Avoid MONEY for PERSON/ROLE slots",
+        "Avoid ADDRESS for MONEY/NUMBER slots",
+    ]
     prompt = (
         "Return ONLY strict JSON with schema: "
-        '{"candidates":[{"key":"...","confidence":0.0}]}\n'
-        "Pick candidates for the blank based on context.\n"
-        f"Context: {span.get('left_context','')} [BLANK] {span.get('right_context','')}\n"
-        f"Keys: {', '.join(data_keys[:50])}"
+        '{"best_key":"...|null","confidence":0.0,"reason_short":"..."}\n'
+        "Pick the best key for the blank, or null if none fit.\n"
+        f"Slot type: {slot_type}\n"
+        f"Context left: {span.get('left_context','')}\n"
+        f"Context right: {span.get('right_context','')}\n"
+        f"Keys: {', '.join(candidate_keys[:30])}\n"
+        f"Bad mappings to avoid: {', '.join(bad_examples)}"
     )
-    response = model.generate(prompt, max_new_tokens=200, temperature=0.0)
+    response = model.generate(prompt, max_new_tokens=200)
     try:
         payload = json.loads(response)
     except json.JSONDecodeError:
-        return []
-    items = payload.get("candidates") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        return []
-    cleaned = []
-    for item in items:
-        key = item.get("key") if isinstance(item, dict) else None
-        conf = item.get("confidence") if isinstance(item, dict) else 0.0
-        if isinstance(key, str) and key in data_keys:
-            cleaned.append({"key": key, "confidence": float(conf)})
-    return cleaned
+        return None
+    if not isinstance(payload, dict):
+        return None
+    best_key = payload.get("best_key")
+    if not isinstance(best_key, str) or best_key not in candidate_keys:
+        return None
+    conf = payload.get("confidence")
+    try:
+        conf_val = float(conf)
+    except (TypeError, ValueError):
+        conf_val = 0.0
+    return {"key": best_key, "confidence": conf_val, "reason_short": payload.get("reason_short")}
 
 
 def map_field_spans(
@@ -138,38 +211,73 @@ def map_field_spans(
         expected_types.update(_expected_types_for_paragraph(paragraph_text, group))
 
     mapping: Dict[str, Optional[str]] = {}
+    candidates_by_span: Dict[str, List[Dict[str, Any]]] = {}
     computed_values: Dict[str, Any] = {}
     type_mismatch_prevented: List[Dict[str, Any]] = []
 
-    # First pass: map all non-duration spans
-    for span in spans:
+    repeatable_keys = {
+        k
+        for k in data_keys
+        if "data completarii" in key_norms[k] or "data completare" in key_norms[k]
+    }
+    used_keys: Dict[str, List[str]] = {}
+    span_context_tokens: Dict[str, List[str]] = {}
+    # First pass: collect candidates
+    sorted_spans = sorted(spans, key=lambda s: str(s.get("span_id") or ""))
+
+    for span in sorted_spans:
         span_id = span.get("span_id")
         if not span_id:
             continue
         if span.get("blank_kind") == "checkbox":
             continue
+        context = f"{span.get('left_context','')} {span.get('right_context','')}"
+        span_context_tokens[span_id] = _tokens(context)
+
+        heuristic_candidates = _candidate_scores(span, data_keys, data_norm)
+        if not heuristic_candidates:
+            query = _normalize_text(context)
+            matches = process.extract(query, list(key_norms.values()), scorer=fuzz.WRatio, limit=10)
+            heuristic_candidates = [
+                {"key": data_keys[idx], "score": float(score) / 100.0}
+                for _, score, idx in matches
+            ]
+        candidates_by_span[span_id] = heuristic_candidates
+
+    # Global assignment (greedy with reuse penalties)
+    span_order: List[Tuple[str, float]] = []
+    for span in sorted_spans:
+        span_id = span.get("span_id")
+        if not span_id or span.get("blank_kind") == "checkbox":
+            continue
+        cand_list = candidates_by_span.get(span_id, [])
+        top1 = cand_list[0]["score"] if len(cand_list) > 0 else 0.0
+        top2 = cand_list[1]["score"] if len(cand_list) > 1 else 0.0
+        span_order.append((span_id, top1 - top2))
+    span_order.sort(key=lambda x: (-x[1], x[0]))
+
+    span_map = {s.get("span_id"): s for s in sorted_spans}
+
+    for span_id, _gap in span_order:
+        span = span_map.get(span_id)
+        if not span:
+            continue
         expected_type = expected_types.get(span_id)
-        if expected_type == "DURATION_DAYS":
+        cand_list = candidates_by_span.get(span_id, [])
+        if not cand_list:
+            mapping[span_id] = None
             continue
 
-        context = f"{span.get('left_context','')} {span.get('right_context','')}"
-        query = _normalize_text(context)
-        matches = process.extract(query, list(key_norms.values()), scorer=fuzz.WRatio, limit=10)
-        candidates = [data_keys[idx] for _, _, idx in matches]
-
-        if expected_type == "ADDRESSEE":
-            candidates = [
-                k
-                for k in candidates
-                if any(tok in key_norms[k] for tok in ("catre", "autoritate", "denumire", "adresa"))
-            ] or candidates
-
-        chosen = None
-        for key in candidates:
+        best_key = None
+        best_score = -1.0
+        for cand in cand_list:
+            key = cand.get("key")
+            if not key:
+                continue
             value = data_norm.get(key)
             if isinstance(value, (list, dict)):
                 continue
-            if not _type_check(expected_type, value):
+            if not _type_check(expected_type, value, span):
                 type_mismatch_prevented.append(
                     {
                         "span_id": span_id,
@@ -179,30 +287,38 @@ def map_field_spans(
                     }
                 )
                 continue
-            chosen = key
-            break
+            score = float(cand.get("score", 0.0))
+            if key in used_keys and key not in repeatable_keys:
+                score -= 0.25
+                existing_ctx = used_keys.get(key, [])
+                if existing_ctx:
+                    sim = _jaccard(span_context_tokens.get(span_id, []), existing_ctx)
+                    if sim < 0.3:
+                        score -= 0.25
+            if score > best_score:
+                best_score = score
+                best_key = key
 
-        if chosen is None and model is not None:
-            llm_cands = _llm_candidates(model, span, data_keys)
-            for cand in llm_cands:
-                key = cand.get("key")
+        if best_key is None:
+            mapping[span_id] = None
+            continue
+
+        top1 = cand_list[0]["score"] if len(cand_list) > 0 else 0.0
+        top2 = cand_list[1]["score"] if len(cand_list) > 1 else 0.0
+        ambiguous = (top1 - top2) < 0.08
+        if ambiguous and model is not None:
+            slot_type = infer_slot_type(span).value
+            cand_keys = [c["key"] for c in cand_list]
+            llm_pick = _llm_choose_key(model, span, slot_type, cand_keys)
+            if llm_pick:
+                key = llm_pick.get("key")
                 value = data_norm.get(key)
-                if isinstance(value, (list, dict)):
-                    continue
-                if not _type_check(expected_type, value):
-                    type_mismatch_prevented.append(
-                        {
-                            "span_id": span_id,
-                            "key": key,
-                            "expected_type": expected_type,
-                            "value": value,
-                        }
-                    )
-                    continue
-                chosen = key
-                break
+                if not isinstance(value, (list, dict)) and _type_check(expected_type, value, span):
+                    best_key = key
 
-        mapping[span_id] = chosen
+        mapping[span_id] = best_key
+        if best_key and best_key not in repeatable_keys:
+            used_keys[best_key] = span_context_tokens.get(span_id, [])
 
     # Second pass: duration days computed if missing
     for _, group in spans_by_para.items():
@@ -217,7 +333,7 @@ def map_field_spans(
         span_date = group_sorted[1]
         sid_duration = span_duration.get("span_id")
         sid_date = span_date.get("span_id")
-        if expected_types.get(sid_duration) != "DURATION_DAYS":
+        if expected_types.get(sid_duration) not in {"DURATION_DAYS", "NUMBER"}:
             continue
         if mapping.get(sid_duration):
             continue
@@ -242,6 +358,7 @@ def map_field_spans(
 
     return {
         "mapping": mapping,
+        "candidates": candidates_by_span,
         "computed_values": computed_values,
         "expected_types": expected_types,
         "unmatched": unmatched,

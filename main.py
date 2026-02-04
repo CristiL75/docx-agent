@@ -34,6 +34,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit with non-zero code if unmatched anchors remain.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for deterministic mapping.",
+    )
+    parser.add_argument(
+        "--llm",
+        choices=["on", "off"],
+        default="on",
+        help="Enable or disable LLM usage for ambiguous slots.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +89,8 @@ def main() -> None:
         artifacts_dir=Path(args.artifacts_dir),
         dry_run=args.dry_run,
         strict=args.strict,
+        seed=args.seed,
+        llm_enabled=args.llm == "on",
     )
 
     if args.report:
