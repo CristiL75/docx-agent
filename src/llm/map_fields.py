@@ -158,3 +158,78 @@ def llm_map_ambiguous(
                 )
 
     return {"items": items}
+
+
+def llm_map_all(
+    anchors: List[Dict[str, object]],
+    data_keys: List[str],
+    model: HFModel,
+    batch_size: int = 8,
+) -> Dict[str, List[Dict[str, Any]]]:
+    norm_keys = [_normalize_text(k) for k in data_keys]
+    items: List[Dict[str, Any]] = []
+
+    candidates_payload = []
+    for anchor in anchors:
+        anchor_id = str(anchor.get("anchor_id") or "")
+        label_text = str(anchor.get("label_text") or "")
+        nearby_text = str(anchor.get("nearby_text") or "")
+        if not anchor_id or not label_text:
+            continue
+        norm_label = _normalize_text(label_text)
+        norm_nearby = _normalize_text(nearby_text)
+        if not norm_label and not norm_nearby:
+            continue
+        query = " ".join([t for t in (norm_label, norm_nearby) if t])
+        matches = process.extract(query, norm_keys, scorer=fuzz.token_set_ratio, limit=8)
+        candidates = [data_keys[idx] for _, _, idx in matches]
+        candidates_payload.append(
+            {
+                "anchor_id": anchor_id,
+                "label_text": label_text,
+                "candidates": candidates,
+            }
+        )
+
+    if not candidates_payload:
+        return {"items": items}
+
+    if model and model.available():
+        for i in range(0, len(candidates_payload), batch_size):
+            batch = candidates_payload[i : i + batch_size]
+            prompt = (
+                "Return ONLY strict JSON with schema: "
+                '{"items":[{"anchor_id":"...","json_key":"...|null","confidence":0.0}]}.\n'
+                "Rules:\n"
+                "- Choose the single best JSON key from each anchor's candidates list.\n"
+                "- Prefer exact semantic match to the anchor label (Romanian).\n"
+                "- If the label is a section title or not a field, use null.\n"
+                "- Confidence between 0.0 and 1.0.\n\n"
+                "Examples:\n"
+                "Label: 'Către' -> json_key: 'Catre - denumirea autoritatii contractante si adresa completa'\n"
+                "Label: 'reprezentanţi ai ofertantului' -> json_key: 'Denumirea / numele ofertantului'\n"
+                "Label: 'Data' -> json_key: 'Data'\n\n"
+                f"Anchors: {batch}\n"
+            )
+            response = model.generate(prompt)
+            parsed_items = _parse_llm_items(response)
+            batch_ids = {b["anchor_id"] for b in batch}
+            for item in parsed_items:
+                anchor_id = str(item.get("anchor_id") or "")
+                json_key = item.get("json_key")
+                confidence = item.get("confidence")
+                if not anchor_id or anchor_id not in batch_ids:
+                    continue
+                if json_key is not None and json_key not in data_keys:
+                    continue
+                if not isinstance(confidence, (int, float)):
+                    confidence = 0.0
+                items.append(
+                    {
+                        "anchor_id": anchor_id,
+                        "json_key": json_key,
+                        "confidence": max(0.0, min(1.0, float(confidence))),
+                    }
+                )
+
+    return {"items": items}

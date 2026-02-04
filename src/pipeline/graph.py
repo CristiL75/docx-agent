@@ -11,7 +11,7 @@ from src.docx_io.fill_checkboxes import fill_checkboxes_in_container
 from src.docx_io.fill_tables import fill_tables
 from src.data.normalize import normalize_key, load_json, normalize_data
 from src.llm.hf_model import HFModel
-from src.llm.map_fields import heuristic_map, llm_map_ambiguous
+from src.llm.map_fields import heuristic_map, llm_map_ambiguous, llm_map_all
 from src.validate.mapping_rules import merge_mappings
 from src.report.make_report import write_report, write_text_report, build_report
 
@@ -68,7 +68,7 @@ def _heuristic_map_node(state: State, artifacts_dir: Path, threshold: int) -> St
 def _llm_map_ambiguous_node(state: State, artifacts_dir: Path, model_name: str) -> State:
     data_keys = list(state["data_norm"].keys())
     model = HFModel(model_name=model_name)
-    llm_mapping = llm_map_ambiguous(state.get("mapping_heuristic", {}), data_keys, model)
+    llm_mapping = llm_map_all(state.get("anchors", []), data_keys, model)
     state.update({"mapping_llm": llm_mapping})
     write_report(artifacts_dir / "mapping_llm.json", llm_mapping)
     return state
