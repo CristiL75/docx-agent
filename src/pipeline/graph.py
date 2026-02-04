@@ -11,7 +11,7 @@ from src.docx_io.fill_checkboxes import fill_checkboxes_in_container
 from src.docx_io.fill_tables import fill_tables
 from src.data.normalize import normalize_key, load_json, normalize_data
 from src.llm.hf_model import HFModel
-from src.llm.map_fields import heuristic_map, llm_map_ambiguous, llm_map_all
+from src.llm.map_fields import heuristic_map, composite_map
 from src.validate.mapping_rules import merge_mappings
 from src.report.make_report import write_report, write_text_report, build_report
 
@@ -59,7 +59,7 @@ def _extract_anchors_node(state: State, artifacts_dir: Path) -> State:
 
 def _heuristic_map_node(state: State, artifacts_dir: Path, threshold: int) -> State:
     data_keys = list(state["data_norm"].keys())
-    heuristic = heuristic_map(state["anchors"], data_keys, threshold=threshold)
+    heuristic = heuristic_map(state["anchors"], state["data_norm"], data_keys, threshold=0.6)
     state.update({"mapping_heuristic": heuristic})
     write_report(artifacts_dir / "mapping_heuristic.json", heuristic)
     return state
@@ -68,9 +68,17 @@ def _heuristic_map_node(state: State, artifacts_dir: Path, threshold: int) -> St
 def _llm_map_ambiguous_node(state: State, artifacts_dir: Path, model_name: str) -> State:
     data_keys = list(state["data_norm"].keys())
     model = HFModel(model_name=model_name)
-    llm_mapping = llm_map_all(state.get("anchors", []), data_keys, model)
-    state.update({"mapping_llm": llm_mapping})
-    write_report(artifacts_dir / "mapping_llm.json", llm_mapping)
+    composite = composite_map(state.get("anchors", []), state["data_norm"], data_keys, model)
+    state.update(
+        {
+            "mapping_heuristic": composite.get("mapping_heuristic", {}),
+            "mapping_llm": composite.get("mapping_llm", {}),
+            "mapping_final": composite.get("mapping_final", {}),
+        }
+    )
+    write_report(artifacts_dir / "mapping_heuristic.json", state.get("mapping_heuristic", {}))
+    write_report(artifacts_dir / "mapping_llm.json", state.get("mapping_llm", {}))
+    write_report(artifacts_dir / "mapping_final.json", state.get("mapping_final", {}))
     return state
 
 
@@ -81,16 +89,18 @@ def _validate_merge_node(
     llm_threshold: float,
     prioritize_llm: bool,
 ) -> State:
-    mapping_final = merge_mappings(
-        state["anchors"],
-        state.get("mapping_heuristic", {}),
-        state.get("mapping_llm", {}),
-        heuristic_threshold=heuristic_threshold,
-        llm_threshold=llm_threshold,
-        prioritize_llm=prioritize_llm,
-    )
-    state["mapping_final"] = mapping_final
-    write_report(artifacts_dir / "mapping_final.json", mapping_final)
+    mapping_final = state.get("mapping_final")
+    if not mapping_final:
+        mapping_final = merge_mappings(
+            state["anchors"],
+            state.get("mapping_heuristic", {}),
+            state.get("mapping_llm", {}),
+            heuristic_threshold=heuristic_threshold,
+            llm_threshold=llm_threshold,
+            prioritize_llm=prioritize_llm,
+        )
+        state["mapping_final"] = mapping_final
+        write_report(artifacts_dir / "mapping_final.json", mapping_final)
 
     unmatched = [
         {"label": a.get("label_text"), "location": a.get("location")}
@@ -195,8 +205,8 @@ def _report_node(state: State, artifacts_dir: Path) -> State:
     used_keys = {v for v in mapping.values() if v}
     unused_keys = [k for k in data_keys if k not in used_keys]
 
-    llm_items = state.get("mapping_llm", {}).get("items", [])
-    llm_by_anchor = {item.get("anchor_id"): item for item in llm_items if item.get("anchor_id")}
+    llm_candidates = state.get("mapping_llm", {}).get("candidates", {})
+    llm_by_anchor = {anchor_id: {"candidates": cands} for anchor_id, cands in llm_candidates.items()}
 
     mapping_summary = []
     for a in state["anchors"]:

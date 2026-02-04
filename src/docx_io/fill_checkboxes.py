@@ -2,6 +2,7 @@ import re
 from typing import Dict, Any, List, Tuple
 
 from docx.text.paragraph import Paragraph
+from rapidfuzz import process, fuzz
 
 from src.docx_io.fill_text import replace_span_across_runs
 from src.docx_io.traverse import TextContainer
@@ -57,29 +58,34 @@ def fill_checkboxes_in_container(container: TextContainer, data: Dict[str, Any],
     value = _get_mapping_value(text, data, mapping)
     if not isinstance(value, str):
         return 0
-
     normalized = value.strip().lower()
-    if normalized != "nu depunem":
-        return 0
 
     line_spans = _line_spans(text)
     checkbox_spans = _find_checkbox_occurrences(text)
     if not checkbox_spans:
         return 0
 
-    target_spans: List[Tuple[int, int]] = []
+    options: List[Tuple[str, Tuple[int, int]]] = []
     for start, end, line in line_spans:
-        if CHECKBOX_PATTERN in line and "nu depunem" in line.lower():
-            target_spans.extend(
-                [(s, e) for s, e in checkbox_spans if s >= start and e <= end]
-            )
+        if CHECKBOX_PATTERN not in line:
+            continue
+        option_text = line.replace(CHECKBOX_PATTERN, "").replace(CHECKBOX_MARKED, "").strip()
+        for s, e in checkbox_spans:
+            if s >= start and e <= end:
+                options.append((option_text, (s, e)))
 
-    if not target_spans:
+    if not options:
         return 0
 
-    filled = 0
-    for span_start, span_end in sorted(target_spans, reverse=True):
-        if replace_span_across_runs(paragraph, span_start, span_end, CHECKBOX_MARKED):
-            filled += 1
+    option_texts = [o[0] for o in options]
+    best = process.extractOne(normalized, option_texts, scorer=fuzz.token_set_ratio)
+    if not best:
+        return 0
+    best_text, best_score, best_idx = best
+    if best_score < 70:
+        return 0
 
-    return filled
+    span_start, span_end = options[best_idx][1]
+    if replace_span_across_runs(paragraph, span_start, span_end, CHECKBOX_MARKED):
+        return 1
+    return 0
