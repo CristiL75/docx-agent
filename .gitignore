@@ -1,0 +1,16 @@
+.venv/
+.env
+.hf_cache/
+artifacts/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.DS_Store
+.vscode/

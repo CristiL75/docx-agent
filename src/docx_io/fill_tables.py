@@ -1,0 +1,141 @@
+from typing import Dict, Any, List, Optional
+import copy
+
+from docx.document import Document
+from docx.table import Table, _Row
+
+from src.data.normalize import normalize_key
+
+
+def _cell_text(cell) -> str:
+    return " ".join(cell.text.split())
+
+
+def _row_is_empty(row: _Row) -> bool:
+    return all(not _cell_text(cell) for cell in row.cells)
+
+
+def _clone_row(table: Table, row: _Row) -> _Row:
+    tbl = table._tbl
+    new_tr = copy.deepcopy(row._tr)
+    tbl.append(new_tr)
+    return _Row(new_tr, table)
+
+
+def _set_cell_text_preserve(cell, value: str) -> None:
+    if not cell.paragraphs:
+        cell.text = value
+        return
+    paragraph = cell.paragraphs[0]
+    runs = paragraph.runs
+    if runs:
+        runs[0].text = value
+        for run in runs[1:]:
+            run.text = ""
+    else:
+        paragraph.add_run(value)
+    for extra in cell.paragraphs[1:]:
+        for run in extra.runs:
+            run.text = ""
+
+
+def _header_map(row: _Row) -> Dict[int, str]:
+    headers = {}
+    for idx, cell in enumerate(row.cells):
+        text = _cell_text(cell)
+        if text:
+            headers[idx] = text
+    return headers
+
+
+def _match_columns(headers: Dict[int, str], sample_row: Dict[str, Any]) -> Dict[int, str]:
+    keys = list(sample_row.keys())
+    norm_keys = {normalize_key(k): k for k in keys}
+    mapping: Dict[int, str] = {}
+    for col_idx, header_text in headers.items():
+        norm_header = normalize_key(header_text)
+        if norm_header in norm_keys:
+            mapping[col_idx] = norm_keys[norm_header]
+            continue
+        for nk, key in norm_keys.items():
+            if norm_header in nk or nk in norm_header:
+                mapping[col_idx] = key
+                break
+    return mapping
+
+
+def _table_has_header(row: _Row, required: List[str]) -> bool:
+    text = " ".join(_cell_text(c).lower() for c in row.cells)
+    return all(req.lower() in text for req in required)
+
+
+def _is_services_table(table: Table, prev_text: Optional[str]) -> bool:
+    if prev_text and "lista principalelor servicii" in prev_text.lower():
+        return True
+    if not table.rows:
+        return False
+    table_text = " ".join(_cell_text(c).lower() for r in table.rows for c in r.cells)
+    if "lista principalelor servicii" in table_text:
+        return True
+    header = table.rows[0]
+    return _table_has_header(header, ["nr", "servicii"])
+
+
+def _is_subcontract_table(table: Table) -> bool:
+    if not table.rows:
+        return False
+    header = table.rows[0]
+    return _table_has_header(header, ["nr", "denumire subcontractant"])
+
+
+def _fill_table(table: Table, rows_data: List[Dict[str, Any]]) -> int:
+    if not rows_data or not table.rows:
+        return 0
+    header_row = table.rows[0]
+    headers = _header_map(header_row)
+    col_map = _match_columns(headers, rows_data[0])
+    if not col_map:
+        return 0
+
+    filled = 0
+    data_row_idx = 1 if len(table.rows) > 1 else None
+    for data_item in rows_data:
+        target_row: Optional[_Row] = None
+        if data_row_idx is not None and data_row_idx < len(table.rows):
+            candidate = table.rows[data_row_idx]
+            if _row_is_empty(candidate):
+                target_row = candidate
+                data_row_idx += 1
+        if target_row is None:
+            template_row = table.rows[1] if len(table.rows) > 1 else table.rows[0]
+            target_row = _clone_row(table, template_row)
+
+        for col_idx, key in col_map.items():
+            value = data_item.get(key)
+            if value is None:
+                continue
+            _set_cell_text_preserve(target_row.cells[col_idx], str(value))
+            filled += 1
+
+    return filled
+
+
+def fill_tables(doc: Document, data: Dict[str, Any]) -> int:
+    filled = 0
+    services_rows = data.get("Tabel - principalele servicii in ultimii 3 ani")
+    subcontract_rows = data.get("Tabel - subcontractanti si parti din contract")
+
+    prev_text = None
+    for block in doc.paragraphs:
+        if block.text.strip():
+            prev_text = block.text
+            break
+
+    for table in doc.tables:
+        if isinstance(services_rows, list) and _is_services_table(table, prev_text):
+            filled += _fill_table(table, services_rows)
+            continue
+        if isinstance(subcontract_rows, list) and _is_subcontract_table(table):
+            filled += _fill_table(table, subcontract_rows)
+
+    return filled

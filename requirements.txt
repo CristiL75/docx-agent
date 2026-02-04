@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+python-docx>=1.1.0
+transformers>=4.38.0
+accelerate>=0.27.0
+torch
+langgraph>=0.2.0
+rapidfuzz>=3.6.0
+bitsandbytes>=0.43.0
+numpy
