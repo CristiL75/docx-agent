@@ -154,7 +154,8 @@ def fill_tables_for_anchors(
     data: Dict[str, Any],
     mapping: Dict[str, str],
 ) -> int:
-    filled = 0
+    filled_tables = 0
+    filled_targets: set = set()
     table_cache: Dict[int, Table] = {i: t for i, t in enumerate(doc.tables)}
 
     for anchor in anchors:
