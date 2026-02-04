@@ -1,6 +1,30 @@
 from typing import Dict, List, Any
 
 
+def _infer_tags_from_text(text: str) -> List[str]:
+    t = text.lower()
+    tags: List[str] = []
+    if not t:
+        return tags
+    if any(x in t for x in ("suma", "lei", "valoare", "tva", "taxa")):
+        tags.append("money")
+    if any(x in t for x in ("%", "procent")):
+        tags.append("percent")
+    if any(x in t for x in ("data", "ziua", "luna", "anul", "an")):
+        tags.append("date")
+    if any(x in t for x in ("durata", "zile", "luni")):
+        tags.append("duration")
+    if any(x in t for x in ("servici", "furniz")):
+        tags.append("service")
+    if any(x in t for x in ("adresa", "sediu", "domiciliu")):
+        tags.append("address")
+    if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
+        tags.append("entity")
+    if any(x in t for x in ("procedura", "contract", "achizitie")):
+        tags.append("process")
+    return tags
+
+
 def _is_critical_label(label_text: str) -> bool:
     text = label_text.lower()
     return any(
@@ -20,6 +44,14 @@ def _is_critical_label(label_text: str) -> bool:
             "subcontract",
         )
     )
+
+
+def _tags_compatible(label_text: str, json_key: str) -> bool:
+    label_tags = set(_infer_tags_from_text(label_text))
+    key_tags = set(_infer_tags_from_text(json_key))
+    if not label_tags or not key_tags:
+        return True
+    return bool(label_tags & key_tags)
 
 
 def merge_mappings(
@@ -55,7 +87,10 @@ def merge_mappings(
                 return False
             score = float(heuristic_item.get("score") or 0.0)
             if score >= heuristic_threshold:
-                final[anchor_id] = str(heuristic_item.get("json_key"))
+                json_key = str(heuristic_item.get("json_key"))
+                if not _tags_compatible(label_text, json_key):
+                    return False
+                final[anchor_id] = json_key
                 return True
             return False
 
@@ -65,7 +100,10 @@ def merge_mappings(
             confidence = float(llm_item.get("confidence") or 0.0)
             json_key = llm_item.get("json_key")
             if json_key is not None and confidence >= llm_threshold:
-                final[anchor_id] = str(json_key)
+                json_key = str(json_key)
+                if not _tags_compatible(label_text, json_key):
+                    return False
+                final[anchor_id] = json_key
                 return True
             return False
 

@@ -16,10 +16,14 @@ def _infer_tags_from_text(text: str) -> List[str]:
         return tags
     if any(x in t for x in ("suma", "lei", "valoare", "tva", "taxa")):
         tags.append("money")
+    if any(x in t for x in ("%", "procent")):
+        tags.append("percent")
     if any(x in t for x in ("data", "ziua", "luna", "anul", "an")):
         tags.append("date")
     if any(x in t for x in ("durata", "zile", "luni")):
         tags.append("duration")
+    if any(x in t for x in ("servici", "furniz")):
+        tags.append("service")
     if any(x in t for x in ("adresa", "sediu", "domiciliu")):
         tags.append("address")
     if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
