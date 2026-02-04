@@ -79,6 +79,7 @@ def _validate_merge_node(
     artifacts_dir: Path,
     heuristic_threshold: float,
     llm_threshold: float,
+    prioritize_llm: bool,
 ) -> State:
     mapping_final = merge_mappings(
         state["anchors"],
@@ -86,6 +87,7 @@ def _validate_merge_node(
         state.get("mapping_llm", {}),
         heuristic_threshold=heuristic_threshold,
         llm_threshold=llm_threshold,
+        prioritize_llm=prioritize_llm,
     )
     state["mapping_final"] = mapping_final
     write_report(artifacts_dir / "mapping_final.json", mapping_final)
@@ -247,10 +249,11 @@ def run_pipeline(
     dry_run: bool = False,
     strict: bool = False,
     heuristic_threshold: int = 90,
-    llm_threshold: float = 0.4,
+    llm_threshold: float = 0.15,
+    prioritize_llm: bool = True,
     repair_rounds: int = 1,
     repair_heuristic_threshold: int = 80,
-    repair_llm_threshold: float = 0.25,
+    repair_llm_threshold: float = 0.15,
 ) -> Dict[str, Any]:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -275,7 +278,13 @@ def run_pipeline(
     graph.add_node("llm_map_ambiguous_node", lambda s: _llm_map_ambiguous_node(s, artifacts_dir, model_name))
     graph.add_node(
         "validate_merge_node",
-        lambda s: _validate_merge_node(s, artifacts_dir, heuristic_threshold, llm_threshold),
+        lambda s: _validate_merge_node(
+            s,
+            artifacts_dir,
+            heuristic_threshold,
+            llm_threshold,
+            prioritize_llm,
+        ),
     )
     graph.add_node("fill_docx_node", lambda s: _fill_docx_node(s, artifacts_dir, dry_run))
     graph.add_node("report_node", lambda s: _report_node(s, artifacts_dir))
@@ -302,6 +311,7 @@ def run_pipeline(
             artifacts_dir,
             heuristic_threshold=repair_heuristic_threshold,
             llm_threshold=repair_llm_threshold,
+            prioritize_llm=prioritize_llm,
         )
         _fill_docx_node(result, artifacts_dir, dry_run)
         _report_node(result, artifacts_dir)

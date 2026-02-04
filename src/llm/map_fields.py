@@ -9,6 +9,26 @@ from rapidfuzz import process, fuzz
 from src.llm.hf_model import HFModel
 
 
+def _infer_tags_from_text(text: str) -> List[str]:
+    t = _normalize_text(text)
+    tags: List[str] = []
+    if not t:
+        return tags
+    if any(x in t for x in ("suma", "lei", "valoare", "tva", "taxa")):
+        tags.append("money")
+    if any(x in t for x in ("data", "ziua", "luna", "anul", "an")):
+        tags.append("date")
+    if any(x in t for x in ("durata", "zile", "luni")):
+        tags.append("duration")
+    if any(x in t for x in ("adresa", "sediu", "domiciliu")):
+        tags.append("address")
+    if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
+        tags.append("entity")
+    if any(x in t for x in ("procedura", "contract", "achizitie")):
+        tags.append("process")
+    return tags
+
+
 def _normalize_text(value: str) -> str:
     text = value.lower()
     text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
@@ -24,6 +44,8 @@ def _heuristic_mapping(
     norm_keys = [_normalize_text(k) for k in data_keys]
     mapping: Dict[str, Dict[str, object]] = {}
 
+    key_tags = {k: _infer_tags_from_text(k) for k in data_keys}
+
     for anchor in anchors:
         label = str(anchor.get("label_text") or "")
         nearby = str(anchor.get("nearby_text") or "")
@@ -34,19 +56,22 @@ def _heuristic_mapping(
         norm_nearby = _normalize_text(nearby)
         if not norm_label and not norm_nearby:
             continue
+        label_tags = set(_infer_tags_from_text(label + " " + nearby))
+        filtered_keys = [k for k in data_keys if (not label_tags) or (label_tags & set(key_tags.get(k, [])))]
+        filtered_norm_keys = [_normalize_text(k) for k in filtered_keys]
         candidates = [norm_label]
         if norm_nearby:
             candidates.append(norm_nearby)
         matches = process.extract(
             " ".join(candidates),
-            norm_keys,
+            filtered_norm_keys or norm_keys,
             scorer=fuzz.token_set_ratio,
             limit=3,
         )
         if not matches:
             continue
         best_match, best_score, best_idx = matches[0]
-        best_key = data_keys[best_idx]
+        best_key = (filtered_keys or data_keys)[best_idx]
         ambiguous = best_score < threshold
         if len(matches) > 1 and matches[1][1] == best_score:
             ambiguous = True
@@ -97,6 +122,7 @@ def llm_map_ambiguous(
     batch_size: int = 8,
 ) -> Dict[str, List[Dict[str, Any]]]:
     norm_keys = [_normalize_text(k) for k in data_keys]
+    key_tags = {k: _infer_tags_from_text(k) for k in data_keys}
     ambiguous = []
     for anchor_id, meta in heuristic_mapping.items():
         if meta.get("ambiguous") is not True:
@@ -107,10 +133,14 @@ def llm_map_ambiguous(
         if norm_label:
             matches = process.extract(norm_label, norm_keys, scorer=fuzz.WRatio, limit=8)
             candidates = [data_keys[idx] for _, _, idx in matches]
+        label_tags = _infer_tags_from_text(label_text)
+        if label_tags:
+            candidates = [k for k in candidates if set(label_tags) & set(key_tags.get(k, []))] or candidates
         ambiguous.append(
             {
                 "anchor_id": anchor_id,
                 "label_text": label_text,
+                "expected_tags": label_tags,
                 "candidates": candidates,
             }
         )
@@ -128,6 +158,7 @@ def llm_map_ambiguous(
                 "Rules:\n"
                 "- Choose the single best JSON key from each anchor's candidates list.\n"
                 "- Prefer exact semantic match to the anchor label (Romanian).\n"
+                "- Respect expected_tags if present.\n"
                 "- If the label is a section title or not a field, use null.\n"
                 "- Confidence between 0.0 and 1.0.\n\n"
                 "Examples:\n"
@@ -167,6 +198,7 @@ def llm_map_all(
     batch_size: int = 8,
 ) -> Dict[str, List[Dict[str, Any]]]:
     norm_keys = [_normalize_text(k) for k in data_keys]
+    key_tags = {k: _infer_tags_from_text(k) for k in data_keys}
     items: List[Dict[str, Any]] = []
 
     candidates_payload = []
@@ -183,10 +215,14 @@ def llm_map_all(
         query = " ".join([t for t in (norm_label, norm_nearby) if t])
         matches = process.extract(query, norm_keys, scorer=fuzz.token_set_ratio, limit=8)
         candidates = [data_keys[idx] for _, _, idx in matches]
+        label_tags = _infer_tags_from_text(label_text + " " + nearby_text)
+        if label_tags:
+            candidates = [k for k in candidates if set(label_tags) & set(key_tags.get(k, []))] or candidates
         candidates_payload.append(
             {
                 "anchor_id": anchor_id,
                 "label_text": label_text,
+                "expected_tags": label_tags,
                 "candidates": candidates,
             }
         )
@@ -203,6 +239,7 @@ def llm_map_all(
                 "Rules:\n"
                 "- Choose the single best JSON key from each anchor's candidates list.\n"
                 "- Prefer exact semantic match to the anchor label (Romanian).\n"
+                "- Respect expected_tags if present.\n"
                 "- If the label is a section title or not a field, use null.\n"
                 "- Confidence between 0.0 and 1.0.\n\n"
                 "Examples:\n"
