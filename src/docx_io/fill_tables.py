@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import copy
 
 from docx.document import Document
@@ -97,7 +97,8 @@ def _fill_table(table: Table, rows_data: List[Dict[str, Any]]) -> int:
     if not col_map:
         return 0
 
-    filled = 0
+    filled_tables = 0
+    filled_targets: set = set()
     data_row_idx = 1 if len(table.rows) > 1 else None
     for data_item in rows_data:
         target_row: Optional[_Row] = None
@@ -145,3 +146,52 @@ def fill_tables(doc: Document, data: Dict[str, Any]) -> int:
             continue
 
     return filled
+
+
+def fill_tables_for_anchors(
+    doc: Document,
+    anchors: List[Dict[str, Any]],
+    data: Dict[str, Any],
+    mapping: Dict[str, str],
+) -> int:
+    filled = 0
+    table_cache: Dict[int, Table] = {i: t for i, t in enumerate(doc.tables)}
+
+    for anchor in anchors:
+        if str(anchor.get("kind")) != "table":
+            continue
+        anchor_id = anchor.get("anchor_id")
+        if not anchor_id:
+            continue
+        key = mapping.get(anchor_id)
+        if not key:
+            continue
+        value = data.get(key)
+        if not (isinstance(value, list) and any(isinstance(i, dict) for i in value)):
+            continue
+
+        loc = anchor.get("location") or {}
+        table_idx = loc.get("table_idx")
+        target_table = table_cache.get(table_idx) if isinstance(table_idx, int) else None
+
+        if target_table is None:
+            for table in doc.tables:
+                if not table.rows:
+                    continue
+                headers = _header_map(table.rows[0])
+                if not headers:
+                    continue
+                if _match_columns(headers, value[0]):
+                    target_table = table
+                    break
+
+        if target_table is None:
+            continue
+
+        if id(target_table) in filled_targets:
+            continue
+        if _fill_table(target_table, value) > 0:
+            filled_targets.add(id(target_table))
+            filled_tables += 1
+
+    return filled_tables

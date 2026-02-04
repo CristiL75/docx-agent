@@ -454,28 +454,74 @@ def _hard_gate(
     norm_key = _normalize_text(key)
     norm_label = _normalize_text(label)
 
-    if field_type in {"DATE", "DATE_PARTS"}:
-        if norm_key.startswith("data"):
+    def _numericish_short(v: Any, max_len: int = 10) -> bool:
+        if isinstance(v, (int, float)):
             return True
+        if not isinstance(v, str):
+            return False
+        text = v.strip()
+        if len(text) > max_len:
+            return False
+        if len(text.split()) > 2:
+            return False
+        cleaned = text.replace("%", "").replace(".", "").replace(",", "")
+        return cleaned.isdigit()
+
+    if "catre" in norm_label:
+        allowed = (
+            "catre",
+            "autoritate contractanta",
+            "denumirea autoritatii",
+            "adresa completa",
+        )
+        if not any(tok in norm_key for tok in allowed):
+            return False
+        if norm_key.startswith("data"):
+            return False
+
+    if field_type in {"DATE", "DATE_PARTS"}:
         if isinstance(value, str) and re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/\d{4}\b", value):
             return True
         return False
 
     if field_type == "PERCENT":
-        if isinstance(value, str) and "%" in value:
+        if isinstance(value, str) and "%" in value and _numericish_short(value, max_len=10):
             return True
         if isinstance(value, (int, float)):
             return True
-        if isinstance(value, str) and value.strip().replace(".", "").isdigit() and len(value.strip()) <= 6:
+        if isinstance(value, str) and _numericish_short(value, max_len=8):
             return True
         return False
 
     if field_type == "NUMBER":
-        if isinstance(value, (int, float)):
-            return True
-        if isinstance(value, str) and value.strip().replace("/", "").replace("-", "").isdigit() and len(value.strip()) <= 12:
+        if _numericish_short(value, max_len=12):
             return True
         return False
+
+    if field_type == "MONEY":
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, str):
+            v = value.lower()
+            if re.search(r"\b\d+[\d\s\.,]*\b", v) and ("lei" in v or "ron" in v or v.strip().replace(".", "").replace(",", "").isdigit()):
+                return True
+        return False
+
+    if field_type == "ORG_NAME":
+        if isinstance(value, str):
+            v = _normalize_text(value)
+            if any(tok in v for tok in ("srl", "sa", "sc", "compania", "institutia")):
+                return True
+            return False
+        return True
+
+    if any(tok in norm_label for tok in ("zile", "durata")):
+        if any(tok in norm_key for tok in ("valabilitate", "durata")):
+            return True
+        if _numericish_short(value, max_len=6):
+            return True
+        if any(tok in norm_key for tok in ("nr si data", "numar si data")):
+            return False
 
     if field_type == "ORG_NAME":
         if any(x in norm_key for x in ("imputernicit", "subsemnat", "reprezentant")):
@@ -489,6 +535,42 @@ def _hard_gate(
             return False
 
     return True
+
+
+def _role_bias(field_type: str, label: str, nearby: str, key: str) -> float:
+    norm_label = _normalize_text(label)
+    norm_nearby = _normalize_text(nearby)
+    norm_key = _normalize_text(key)
+    text = f"{norm_label} {norm_nearby}".strip()
+    score = 0.0
+
+    if field_type.startswith("ORG"):
+        if any(tok in norm_key for tok in ("ofertant", "operator economic", "contractant")):
+            score += 0.2
+    if field_type.startswith("PERSON"):
+        if any(tok in norm_key for tok in ("subsemnat", "imputernicit", "reprezentant")):
+            score += 0.2
+
+    if norm_label == "data":
+        if norm_key == "data" or "data completarii" in norm_key:
+            score += 0.2
+        if any(tok in norm_key for tok in ("anunt", "invitatie", "nr si data", "numar si data")):
+            score -= 0.2
+
+    if any(tok in text for tok in ("zile", "durata")):
+        if any(tok in norm_key for tok in ("valabilitate", "durata")):
+            score += 0.2
+        if any(tok in norm_key for tok in ("nr si data", "numar si data")):
+            score -= 0.2
+
+    if "catre" in text:
+        if "data" in norm_key and not any(
+            tok in norm_key
+            for tok in ("catre", "autoritate contractanta", "denumirea autoritatii", "adresa completa")
+        ):
+            score -= 0.3
+
+    return max(-1.0, min(1.0, score))
 
 
 def _build_candidates(
@@ -526,16 +608,18 @@ def _build_candidates(
         cand_list: List[Dict[str, Any]] = []
         for key, meta in merged.items():
             value = data_norm.get(key)
-            if not _hard_gate(field_type, label, key, value):
+            if not _hard_gate(field_type, f"{label} {nearby}", key, value):
                 continue
             key_type = key_types.get(key, "TEXT")
             score_type = 1.0 if _type_compatible(field_type, key_type) else 0.0
             score_context = _context_score(label, nearby, key)
+            score_role = _role_bias(field_type, label, nearby, key)
             total = (
                 0.45 * meta.get("score_text", 0.0)
                 + 0.25 * meta.get("score_llm", 0.0)
                 + 0.20 * score_type
                 + 0.10 * score_context
+                + 0.05 * score_role
             )
             cand_list.append(
                 {
@@ -544,6 +628,7 @@ def _build_candidates(
                     "score_llm": meta.get("score_llm", 0.0),
                     "score_type": score_type,
                     "score_context": score_context,
+                    "score_role": score_role,
                     "total": total,
                     "field_type": field_type,
                 }
@@ -780,7 +865,7 @@ def solve_global_mapping(
                         mapping_final.pop(aid, None)
                         role_repairs_made += 1
 
-        if role_pattern == "MONEY_THEN_PERCENT":
+        if role_pattern == "MONEY_PERCENT":
             for pos, a in enumerate(items[:2]):
                 aid = str(a.get("anchor_id") or "")
                 if not aid:
@@ -797,6 +882,39 @@ def solve_global_mapping(
                     continue
                 conflicts_found += 1
                 next_key = _pick_best_of_type(aid, required)
+                if next_key:
+                    mapping_final[aid] = next_key
+                    repairs_made += 1
+                    role_repairs_made += 1
+                else:
+                    if aid in mapping_final:
+                        mapping_final.pop(aid, None)
+                        role_repairs_made += 1
+
+        if role_pattern == "CATRE_HEADER":
+            allowed_tokens = ("autoritate", "denumire", "adresa", "catre")
+            for a in items:
+                aid = str(a.get("anchor_id") or "")
+                if not aid:
+                    continue
+                current = mapping_final.get(aid)
+                if current:
+                    norm_key = _normalize_text(current)
+                    if any(tok in norm_key for tok in allowed_tokens) and not norm_key.startswith("data"):
+                        continue
+                conflicts_found += 1
+                next_key = None
+                for cand in candidates.get(aid, []):
+                    key = cand.get("key")
+                    if not key:
+                        continue
+                    norm_key = _normalize_text(key)
+                    if not any(tok in norm_key for tok in allowed_tokens):
+                        continue
+                    if norm_key.startswith("data"):
+                        continue
+                    next_key = key
+                    break
                 if next_key:
                     mapping_final[aid] = next_key
                     repairs_made += 1

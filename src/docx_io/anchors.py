@@ -125,6 +125,7 @@ def extract_anchors(
     checkbox_group: List[Dict[str, object]] = []
     checkbox_group_text: List[str] = []
     checkbox_group_location: Optional[Location] = None
+    checkbox_gap = 0
 
     def _flush_checkbox_group() -> None:
         nonlocal anchor_id, checkbox_group, checkbox_group_text, checkbox_group_location
@@ -159,6 +160,7 @@ def extract_anchors(
             if not checkbox_group:
                 checkbox_group_location = container.location
             checkbox_group_text.append(text.strip())
+            checkbox_gap = 0
             for start, end, line in _line_spans(text):
                 if not CHECKBOX_RE.search(line):
                     continue
@@ -183,7 +185,13 @@ def extract_anchors(
             prev_text = text
             continue
         else:
-            _flush_checkbox_group()
+            if checkbox_group:
+                checkbox_gap += 1
+                if checkbox_gap > 1:
+                    _flush_checkbox_group()
+                    checkbox_gap = 0
+            else:
+                checkbox_gap = 0
 
         placeholder_spans = _find_placeholder_spans(text)
         for start, end, placeholder in placeholder_spans:
@@ -268,14 +276,16 @@ def _assign_cluster(items: List[Dict[str, object]], cluster_id: int) -> Dict[str
     raw = text_context.lower()
     norm = _normalize_role_text(raw)
     role_pattern = None
-    if re.search(r"subsemnatul.*reprezentant", norm, re.DOTALL):
+    if re.search(r"subsemnatul.*reprezentant.*al", norm, re.DOTALL):
         role_pattern = "PERSON_THEN_ORG"
     elif re.search(r"parafat.*banca.*ziua.*luna.*anul", norm, re.DOTALL):
         role_pattern = "ORG_THEN_DATE"
-    elif re.search(r"noi.*denumirea.*(ofertant|tert)", norm, re.DOTALL):
+    elif re.search(r"\(denumirea.*(ofertant|tert|operator)", norm, re.DOTALL):
         role_pattern = "ORG_ONLY"
-    elif re.search(r"sumei.*%|reprezentand.*%", norm, re.DOTALL):
-        role_pattern = "MONEY_THEN_PERCENT"
+    elif re.search(r"^catre", norm, re.DOTALL):
+        role_pattern = "CATRE_HEADER"
+    elif re.search(r"suma.*%|penalitati.*%|reprezentand.*%", norm, re.DOTALL):
+        role_pattern = "MONEY_PERCENT"
 
     for item in items:
         item["cluster_id"] = cluster_id

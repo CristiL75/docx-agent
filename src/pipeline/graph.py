@@ -9,10 +9,10 @@ from src.docx_io.traverse import iter_text_containers
 from src.docx_io.anchors import extract_anchors
 from src.docx_io.fill_text import fill_text_container
 from src.docx_io.fill_checkboxes import fill_checkboxes_in_container, fill_checkbox_groups
-from src.docx_io.fill_tables import fill_tables
+from src.docx_io.fill_tables import fill_tables, fill_tables_for_anchors
 from src.data.normalize import normalize_key, load_json, normalize_data
 from src.llm.hf_model import HFModel
-from src.llm.map_fields import heuristic_map, composite_map
+from src.llm.map_fields import heuristic_map, composite_map, _infer_field_type, _infer_key_type
 from src.validate.mapping_rules import merge_mappings
 from src.report.make_report import write_report, write_text_report, build_report
 
@@ -148,8 +148,16 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
     for container in iter_text_containers(doc):
         location_map[_loc_key(container.location.__dict__)] = container
 
+    checkbox_anchors = [
+        a
+        for a in state["anchors"]
+        if a.get("kind") in {"checkbox", "checkbox_group"} or _infer_field_type(a) == "CHECKBOX_GROUP"
+    ]
+    table_anchors = [a for a in state["anchors"] if a.get("kind") == "table" or _infer_field_type(a) == "TABLE"]
+    text_anchors = [a for a in state["anchors"] if a not in checkbox_anchors and a not in table_anchors]
+
     anchors_by_container: Dict[int, List[Dict[str, Any]]] = {}
-    for anchor in state["anchors"]:
+    for anchor in text_anchors:
         if not anchor.get("placeholder_span"):
             continue
         location = anchor.get("location")
@@ -203,14 +211,19 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
     }
 
     checkbox_filled = 0
-    checkbox_filled += fill_checkbox_groups(state.get("anchors", []), state["data_norm"], label_mapping)
-    for container in iter_text_containers(doc):
-        filled_here = fill_checkboxes_in_container(container, state["data_norm"], label_mapping)
-        checkbox_filled += filled_here
-        if filled_here:
-            actions.append({"type": "checkbox", "label": container.text})
+    if checkbox_anchors:
+        checkbox_filled += fill_checkbox_groups(checkbox_anchors, state["data_norm"], label_mapping)
+        for container in iter_text_containers(doc):
+            filled_here = fill_checkboxes_in_container(container, state["data_norm"], label_mapping)
+            checkbox_filled += filled_here
+            if filled_here:
+                actions.append({"type": "checkbox", "label": container.text})
 
-    table_filled = fill_tables(doc, state["data_norm"])
+    table_filled = 0
+    if table_anchors:
+        table_filled = fill_tables_for_anchors(doc, table_anchors, state["data_norm"], mapping)
+    elif any(isinstance(v, list) and any(isinstance(i, dict) for i in v) for v in state["data_norm"].values()):
+        table_filled = fill_tables(doc, state["data_norm"])
 
     doc.save(str(state["out_path"]))
     actions.append(
@@ -221,6 +234,27 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
             "filled_tables": table_filled,
         }
     )
+    table_json_keys = [
+        k
+        for k, v in state["data_norm"].items()
+        if isinstance(v, list) and any(isinstance(i, dict) for i in v)
+    ]
+    if checkbox_anchors and checkbox_filled == 0:
+        raise SystemExit("CHECKBOX_GROUP anchors present but no checkboxes filled")
+    if table_json_keys and table_filled < len(table_json_keys):
+        raise SystemExit("TABLE json_keys present but tables not filled")
+    for a in state["anchors"]:
+        label = str(a.get("label_text") or "")
+        nearby = str(a.get("nearby_text") or "")
+        norm = f"{label} {nearby}".lower()
+        if "catre" not in norm:
+            continue
+        key = mapping.get(a.get("anchor_id"))
+        if not key:
+            continue
+        key_type = _infer_key_type(key)
+        if key_type in {"DATE", "DATE_PARTS"} or key.strip().lower().startswith("data"):
+            raise SystemExit("Catre mapped to DATE key")
     state["actions"] = actions
     return state
 
