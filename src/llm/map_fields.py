@@ -673,6 +673,8 @@ def solve_global_mapping(
             break
 
     # Role-pattern cluster enforcement
+    role_clusters_detected = 0
+    role_repairs_made = 0
     def _cluster_sort_key(a: Dict[str, object]) -> Tuple[int, str]:
         loc = a.get("location") or {}
         return (loc.get("paragraph_idx") or -1, str(a.get("anchor_id") or ""))
@@ -697,6 +699,7 @@ def solve_global_mapping(
         role_pattern = items[0].get("role_pattern")
         if not role_pattern:
             continue
+        role_clusters_detected += 1
         items.sort(key=_cluster_sort_key)
 
         if role_pattern == "PERSON_THEN_ORG":
@@ -719,8 +722,13 @@ def solve_global_mapping(
                 if next_key:
                     mapping_final[aid] = next_key
                     repairs_made += 1
+                    role_repairs_made += 1
+                else:
+                    if aid in mapping_final:
+                        mapping_final.pop(aid, None)
+                        role_repairs_made += 1
 
-        if role_pattern == "ORG_THEN_DATE_PARTS":
+        if role_pattern == "ORG_THEN_DATE":
             for pos, a in enumerate(items):
                 aid = str(a.get("anchor_id") or "")
                 if not aid:
@@ -740,8 +748,70 @@ def solve_global_mapping(
                 if next_key:
                     mapping_final[aid] = next_key
                     repairs_made += 1
+                    role_repairs_made += 1
+                else:
+                    if aid in mapping_final:
+                        mapping_final.pop(aid, None)
+                        role_repairs_made += 1
 
-    stats = {"conflicts_found": conflicts_found, "repairs_made": repairs_made}
+        if role_pattern == "ORG_ONLY":
+            for a in items:
+                aid = str(a.get("anchor_id") or "")
+                if not aid:
+                    continue
+                required = ("ORG_NAME",)
+                current = mapping_final.get(aid)
+                current_type = None
+                if current:
+                    for cand in candidates.get(aid, []):
+                        if cand.get("key") == current:
+                            current_type = cand.get("field_type")
+                            break
+                if current_type in required:
+                    continue
+                conflicts_found += 1
+                next_key = _pick_best_of_type(aid, required)
+                if next_key:
+                    mapping_final[aid] = next_key
+                    repairs_made += 1
+                    role_repairs_made += 1
+                else:
+                    if aid in mapping_final:
+                        mapping_final.pop(aid, None)
+                        role_repairs_made += 1
+
+        if role_pattern == "MONEY_THEN_PERCENT":
+            for pos, a in enumerate(items[:2]):
+                aid = str(a.get("anchor_id") or "")
+                if not aid:
+                    continue
+                required = ("MONEY",) if pos == 0 else ("PERCENT",)
+                current = mapping_final.get(aid)
+                current_type = None
+                if current:
+                    for cand in candidates.get(aid, []):
+                        if cand.get("key") == current:
+                            current_type = cand.get("field_type")
+                            break
+                if current_type in required:
+                    continue
+                conflicts_found += 1
+                next_key = _pick_best_of_type(aid, required)
+                if next_key:
+                    mapping_final[aid] = next_key
+                    repairs_made += 1
+                    role_repairs_made += 1
+                else:
+                    if aid in mapping_final:
+                        mapping_final.pop(aid, None)
+                        role_repairs_made += 1
+
+    stats = {
+        "conflicts_found": conflicts_found,
+        "repairs_made": repairs_made,
+        "role_clusters_detected": role_clusters_detected,
+        "role_repairs_made": role_repairs_made,
+    }
     return mapping_final, stats
 
 

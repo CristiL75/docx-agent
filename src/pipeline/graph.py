@@ -21,10 +21,12 @@ class State(TypedDict):
     template_path: Path
     data_path: Path
     anchors: List[Dict[str, Any]]
+    anchor_clusters: List[Dict[str, Any]]
     data_norm: Dict[str, Any]
     mapping_heuristic: Dict[str, Dict[str, Any]]
     mapping_llm: Dict[str, Any]
     mapping_final: Dict[str, str]
+    mapping_stats: Dict[str, Any]
     issues: List[Dict[str, Any]]
     actions: List[Dict[str, Any]]
     out_path: Path
@@ -51,8 +53,9 @@ def _normalize_data_node(state: State, artifacts_dir: Path) -> State:
 def _extract_anchors_node(state: State, artifacts_dir: Path) -> State:
     doc = Document(str(state["template_path"]))
     containers = list(iter_text_containers(doc))
-    anchors = extract_anchors(containers, doc)
+    anchors, clusters = extract_anchors(containers, doc)
     state["anchors"] = anchors
+    state["anchor_clusters"] = clusters
     anchors_report = []
     for a in anchors:
         cleaned = {k: v for k, v in a.items() if k != "container"}
@@ -61,6 +64,7 @@ def _extract_anchors_node(state: State, artifacts_dir: Path) -> State:
             cleaned["options"] = [{kk: vv for kk, vv in opt.items() if kk != "container"} for opt in options]
         anchors_report.append(cleaned)
     write_report(artifacts_dir / "anchors.json", anchors_report)
+    write_report(artifacts_dir / "anchor_clusters.json", clusters)
     return state
 
 
@@ -266,6 +270,8 @@ def _report_node(state: State, artifacts_dir: Path) -> State:
     )
     report["conflicts_found"] = int(state.get("mapping_stats", {}).get("conflicts_found", 0))
     report["repairs_made"] = int(state.get("mapping_stats", {}).get("repairs_made", 0))
+    report["role_clusters_detected"] = int(state.get("mapping_stats", {}).get("role_clusters_detected", 0))
+    report["role_repairs_made"] = int(state.get("mapping_stats", {}).get("role_repairs_made", 0))
 
     state["report"] = report
     write_report(artifacts_dir / "report.json", report)
@@ -295,10 +301,12 @@ def run_pipeline(
         "template_path": input_docx,
         "data_path": input_json,
         "anchors": [],
+        "anchor_clusters": [],
         "data_norm": {},
         "mapping_heuristic": {},
         "mapping_llm": {},
         "mapping_final": {},
+        "mapping_stats": {},
         "issues": [],
         "actions": [],
         "out_path": output_docx,

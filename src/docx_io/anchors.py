@@ -1,4 +1,6 @@
 import re
+import string
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 from docx import Document
@@ -113,7 +115,10 @@ def _get_table_cell_text(doc: Document, location: Location, col_offset: int) -> 
     return table.rows[location.row].cells[col_idx].text.strip()
 
 
-def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict[str, object]]:
+def extract_anchors(
+    containers: List[TextContainer],
+    doc: Document,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
     anchors: List[Dict[str, object]] = []
     anchor_id = 1
     prev_text: Optional[str] = None
@@ -223,6 +228,7 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
         key = (loc.get("type"), loc.get("section_idx"), loc.get("header_footer"), loc.get("table_idx"))
         clusters.setdefault(key, []).append(a)
 
+    cluster_defs: List[Dict[str, object]] = []
     cluster_id = 1
     for key, items in clusters.items():
         items.sort(key=lambda x: (x.get("location", {}).get("paragraph_idx") or -1))
@@ -233,24 +239,51 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
             if last_idx is None or (idx is not None and last_idx is not None and idx - last_idx <= 2):
                 current.append(item)
             else:
-                _assign_cluster(current, cluster_id)
+                cluster_defs.append(_assign_cluster(current, cluster_id))
                 cluster_id += 1
                 current = [item]
             last_idx = idx
         if current:
-            _assign_cluster(current, cluster_id)
+            cluster_defs.append(_assign_cluster(current, cluster_id))
             cluster_id += 1
 
-    return anchors
+    return anchors, cluster_defs
 
 
-def _assign_cluster(items: List[Dict[str, object]], cluster_id: int) -> None:
-    combined = " ".join(str(i.get("nearby_text") or "") for i in items).lower()
+def _normalize_role_text(value: str) -> str:
+    text = value.lower()
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    allowed_punct = {"%"}
+    table = {
+        ch: " "
+        for ch in string.punctuation
+        if ch not in allowed_punct
+    }
+    text = text.translate(str.maketrans(table))
+    return " ".join(text.split())
+
+
+def _assign_cluster(items: List[Dict[str, object]], cluster_id: int) -> Dict[str, object]:
+    text_context = " ".join(str(i.get("nearby_text") or "") for i in items).strip()
+    raw = text_context.lower()
+    norm = _normalize_role_text(raw)
     role_pattern = None
-    if re.search(r"subsemnatul .* reprezentant .*", combined):
+    if re.search(r"subsemnatul.*reprezentant", norm, re.DOTALL):
         role_pattern = "PERSON_THEN_ORG"
-    if re.search(r"parafata de .* in ziua .* luna .* anul .*", combined):
-        role_pattern = "ORG_THEN_DATE_PARTS"
+    elif re.search(r"parafat.*banca.*ziua.*luna.*anul", norm, re.DOTALL):
+        role_pattern = "ORG_THEN_DATE"
+    elif re.search(r"noi.*denumirea.*(ofertant|tert)", norm, re.DOTALL):
+        role_pattern = "ORG_ONLY"
+    elif re.search(r"sumei.*%|reprezentand.*%", norm, re.DOTALL):
+        role_pattern = "MONEY_THEN_PERCENT"
+
     for item in items:
         item["cluster_id"] = cluster_id
         item["role_pattern"] = role_pattern
+
+    return {
+        "cluster_id": cluster_id,
+        "anchors": [i.get("anchor_id") for i in items if i.get("anchor_id")],
+        "text_context": text_context,
+        "role_pattern": role_pattern,
+    }
