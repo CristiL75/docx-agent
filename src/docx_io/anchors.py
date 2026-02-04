@@ -216,4 +216,41 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
 
     _flush_checkbox_group()
 
+    # cluster anchors by paragraph proximity (window=2)
+    clusters: Dict[Tuple, List[Dict[str, object]]] = {}
+    for a in anchors:
+        loc = a.get("location") or {}
+        key = (loc.get("type"), loc.get("section_idx"), loc.get("header_footer"), loc.get("table_idx"))
+        clusters.setdefault(key, []).append(a)
+
+    cluster_id = 1
+    for key, items in clusters.items():
+        items.sort(key=lambda x: (x.get("location", {}).get("paragraph_idx") or -1))
+        current: List[Dict[str, object]] = []
+        last_idx = None
+        for item in items:
+            idx = item.get("location", {}).get("paragraph_idx")
+            if last_idx is None or (idx is not None and last_idx is not None and idx - last_idx <= 2):
+                current.append(item)
+            else:
+                _assign_cluster(current, cluster_id)
+                cluster_id += 1
+                current = [item]
+            last_idx = idx
+        if current:
+            _assign_cluster(current, cluster_id)
+            cluster_id += 1
+
     return anchors
+
+
+def _assign_cluster(items: List[Dict[str, object]], cluster_id: int) -> None:
+    combined = " ".join(str(i.get("nearby_text") or "") for i in items).lower()
+    role_pattern = None
+    if re.search(r"subsemnatul .* reprezentant .*", combined):
+        role_pattern = "PERSON_THEN_ORG"
+    if re.search(r"parafata de .* in ziua .* luna .* anul .*", combined):
+        role_pattern = "ORG_THEN_DATE_PARTS"
+    for item in items:
+        item["cluster_id"] = cluster_id
+        item["role_pattern"] = role_pattern

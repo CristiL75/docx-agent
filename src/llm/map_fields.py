@@ -672,6 +672,75 @@ def solve_global_mapping(
         if not repaired_any:
             break
 
+    # Role-pattern cluster enforcement
+    def _cluster_sort_key(a: Dict[str, object]) -> Tuple[int, str]:
+        loc = a.get("location") or {}
+        return (loc.get("paragraph_idx") or -1, str(a.get("anchor_id") or ""))
+
+    def _pick_best_of_type(aid: str, allowed: Tuple[str, ...]) -> Optional[str]:
+        cand_list = candidates.get(aid, [])
+        for cand in cand_list:
+            if cand.get("field_type") in allowed:
+                return cand.get("key")
+        return None
+
+    clusters: Dict[int, List[Dict[str, object]]] = {}
+    for a in anchors:
+        cid = a.get("cluster_id")
+        if cid is None:
+            continue
+        clusters.setdefault(int(cid), []).append(a)
+
+    for _, items in clusters.items():
+        if not items:
+            continue
+        role_pattern = items[0].get("role_pattern")
+        if not role_pattern:
+            continue
+        items.sort(key=_cluster_sort_key)
+
+        if role_pattern == "PERSON_THEN_ORG":
+            for pos, a in enumerate(items[:2]):
+                aid = str(a.get("anchor_id") or "")
+                if not aid:
+                    continue
+                required = ("PERSON_NAME",) if pos == 0 else ("ORG_NAME", "ORG_ADDRESS")
+                current = mapping_final.get(aid)
+                current_type = None
+                if current:
+                    for cand in candidates.get(aid, []):
+                        if cand.get("key") == current:
+                            current_type = cand.get("field_type")
+                            break
+                if current_type in required:
+                    continue
+                conflicts_found += 1
+                next_key = _pick_best_of_type(aid, required)
+                if next_key:
+                    mapping_final[aid] = next_key
+                    repairs_made += 1
+
+        if role_pattern == "ORG_THEN_DATE_PARTS":
+            for pos, a in enumerate(items):
+                aid = str(a.get("anchor_id") or "")
+                if not aid:
+                    continue
+                required = ("ORG_NAME",) if pos == 0 else ("DATE_PARTS",)
+                current = mapping_final.get(aid)
+                current_type = None
+                if current:
+                    for cand in candidates.get(aid, []):
+                        if cand.get("key") == current:
+                            current_type = cand.get("field_type")
+                            break
+                if current_type in required:
+                    continue
+                conflicts_found += 1
+                next_key = _pick_best_of_type(aid, required)
+                if next_key:
+                    mapping_final[aid] = next_key
+                    repairs_made += 1
+
     stats = {"conflicts_found": conflicts_found, "repairs_made": repairs_made}
     return mapping_final, stats
 
