@@ -22,14 +22,26 @@ def _infer_tags_from_text(text: str) -> List[str]:
         tags.append("date")
     if any(x in t for x in ("durata", "zile", "luni")):
         tags.append("duration")
+    if any(x in t for x in ("valabil", "valabilitate")):
+        tags.append("validity")
     if any(x in t for x in ("servici", "furniz")):
         tags.append("service")
+    if any(x in t for x in ("plata", "termen", "conditii")):
+        tags.append("payment")
+    if any(x in t for x in ("penalit" , "doband")):
+        tags.append("penalty")
     if any(x in t for x in ("adresa", "sediu", "domiciliu")):
         tags.append("address")
     if any(x in t for x in ("banca", "asigur", "parafata")):
         tags.append("bank")
     if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
         tags.append("entity")
+    if any(x in t for x in ("autoritate", "catre")):
+        tags.append("authority")
+    if "ofert" in t:
+        tags.append("offer")
+    if "subcontract" in t:
+        tags.append("subcontract")
     if any(
         x in t
         for x in (
@@ -47,6 +59,8 @@ def _infer_tags_from_text(text: str) -> List[str]:
     ):
         tags.append("person")
         tags.append("role")
+    if any(x in t for x in ("cif", "cnp", "registrul", "comert", "serie", "numar", "bi", "ci")):
+        tags.append("id")
     if any(x in t for x in ("procedura", "contract", "achizitie")):
         tags.append("process")
     return tags

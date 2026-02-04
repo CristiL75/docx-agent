@@ -15,14 +15,26 @@ def _infer_tags_from_text(text: str) -> List[str]:
         tags.append("date")
     if any(x in t for x in ("durata", "zile", "luni")):
         tags.append("duration")
+    if any(x in t for x in ("valabil", "valabilitate")):
+        tags.append("validity")
     if any(x in t for x in ("servici", "furniz")):
         tags.append("service")
+    if any(x in t for x in ("plata", "termen", "conditii")):
+        tags.append("payment")
+    if any(x in t for x in ("penalit", "doband")):
+        tags.append("penalty")
     if any(x in t for x in ("adresa", "sediu", "domiciliu")):
         tags.append("address")
     if any(x in t for x in ("banca", "asigur", "parafata")):
         tags.append("bank")
     if any(x in t for x in ("denumirea", "numele", "operator", "ofertant", "achizitor")):
         tags.append("entity")
+    if any(x in t for x in ("autoritate", "catre")):
+        tags.append("authority")
+    if "ofert" in t:
+        tags.append("offer")
+    if "subcontract" in t:
+        tags.append("subcontract")
     if any(
         x in t
         for x in (
@@ -40,6 +52,8 @@ def _infer_tags_from_text(text: str) -> List[str]:
     ):
         tags.append("person")
         tags.append("role")
+    if any(x in t for x in ("cif", "cnp", "registrul", "comert", "serie", "numar", "bi", "ci")):
+        tags.append("id")
     if any(x in t for x in ("procedura", "contract", "achizitie")):
         tags.append("process")
     return tags
@@ -71,6 +85,18 @@ def _tags_compatible(label_text: str, json_key: str) -> bool:
     key_tags = set(_infer_tags_from_text(json_key))
     if not label_tags or not key_tags:
         return True
+    if ("person" in label_tags or "role" in label_tags) and not ("person" in key_tags or "role" in key_tags):
+        return False
+    if "authority" in label_tags and "authority" not in key_tags:
+        return False
+    if "offer" in label_tags and "offer" not in key_tags:
+        return False
+    if "id" in label_tags and "id" not in key_tags:
+        return False
+    if "payment" in label_tags and "payment" not in key_tags:
+        return False
+    if "validity" in label_tags and not ({"validity", "date", "duration"} & key_tags):
+        return False
     return bool(label_tags & key_tags)
 
 
@@ -119,6 +145,7 @@ def merge_mappings(
             continue
         label_text = str(anchor.get("label_text") or "")
         critical = _is_critical_label(label_text)
+        label_tags = set(_infer_tags_from_text(label_text))
         has_placeholder = bool(anchor.get("placeholder_span")) or _looks_like_placeholder(label_text)
         looks_heading = _looks_like_heading(label_text)
 
@@ -133,6 +160,10 @@ def merge_mappings(
             heuristic_threshold_local = min(heuristic_threshold_local, 80.0)
         if critical:
             heuristic_threshold_local = min(heuristic_threshold_local, 75.0)
+        if label_tags:
+            heuristic_threshold_local = min(heuristic_threshold_local, 65.0)
+        if label_tags & {"money", "date", "percent", "duration"}:
+            heuristic_threshold_local = min(heuristic_threshold_local, 60.0)
 
         llm_threshold_local = llm_threshold
         if has_placeholder:
@@ -143,6 +174,12 @@ def merge_mappings(
                 return False
             score = float(heuristic_item.get("score") or 0.0)
             if score >= heuristic_threshold_local:
+                json_key = str(heuristic_item.get("json_key"))
+                if not _tags_compatible(label_text, json_key):
+                    return False
+                final[anchor_id] = json_key
+                return True
+            if label_tags and score >= 55.0:
                 json_key = str(heuristic_item.get("json_key"))
                 if not _tags_compatible(label_text, json_key):
                     return False
