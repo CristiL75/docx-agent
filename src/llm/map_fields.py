@@ -1,6 +1,7 @@
 import json
 import re
 import string
+import unicodedata
 from typing import Dict, List, Any
 
 from rapidfuzz import process, fuzz
@@ -10,6 +11,7 @@ from src.llm.hf_model import HFModel
 
 def _normalize_text(value: str) -> str:
     text = value.lower()
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
     text = text.translate(str.maketrans("", "", string.punctuation))
     return " ".join(text.split())
 
@@ -24,13 +26,23 @@ def _heuristic_mapping(
 
     for anchor in anchors:
         label = str(anchor.get("label_text") or "")
+        nearby = str(anchor.get("nearby_text") or "")
         anchor_id = str(anchor.get("anchor_id") or "")
         if not anchor_id or not label:
             continue
         norm_label = _normalize_text(label)
-        if not norm_label:
+        norm_nearby = _normalize_text(nearby)
+        if not norm_label and not norm_nearby:
             continue
-        matches = process.extract(norm_label, norm_keys, scorer=fuzz.WRatio, limit=2)
+        candidates = [norm_label]
+        if norm_nearby:
+            candidates.append(norm_nearby)
+        matches = process.extract(
+            " ".join(candidates),
+            norm_keys,
+            scorer=fuzz.token_set_ratio,
+            limit=3,
+        )
         if not matches:
             continue
         best_match, best_score, best_idx = matches[0]

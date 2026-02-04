@@ -37,27 +37,6 @@ def merge_mappings(
             if json_key is not None and confidence >= llm_threshold:
                 final[anchor_id] = str(json_key)
 
-    for anchor in anchors:
-        label_text = str(anchor.get("label_text") or "")
-        anchor_id = str(anchor.get("anchor_id") or "")
-        if not anchor_id:
-            continue
-
-        if "Către" in label_text or "Catre" in label_text:
-            final[anchor_id] = "Catre - denumirea autoritatii contractante si adresa completa"
-
-        if "reprezentanţi ai ofertantului" in label_text or "reprezentanti ai ofertantului" in label_text:
-            final[anchor_id] = "Denumirea / numele ofertantului"
-
-        if "Optiune oferta alternativa" in label_text:
-            final[anchor_id] = "Optiune oferta alternativa (depunem / nu depunem)"
-
-        if "LISTA principalelor servicii" in label_text:
-            final[anchor_id] = "Tabel - principalele servicii in ultimii 3 ani"
-
-        if "subcontract" in label_text.lower() and "tabel" in label_text.lower():
-            final[anchor_id] = "Tabel - subcontractanti si parti din contract"
-
     return final
 
 

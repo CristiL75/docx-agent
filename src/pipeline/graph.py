@@ -13,7 +13,7 @@ from src.data.normalize import normalize_key, load_json, normalize_data
 from src.llm.hf_model import HFModel
 from src.llm.map_fields import heuristic_map, llm_map_ambiguous
 from src.validate.mapping_rules import merge_mappings
-from src.report.make_report import write_report, build_report
+from src.report.make_report import write_report, write_text_report, build_report
 
 
 class State(TypedDict):
@@ -74,11 +74,18 @@ def _llm_map_ambiguous_node(state: State, artifacts_dir: Path, model_name: str) 
     return state
 
 
-def _validate_merge_node(state: State, artifacts_dir: Path) -> State:
+def _validate_merge_node(
+    state: State,
+    artifacts_dir: Path,
+    heuristic_threshold: float,
+    llm_threshold: float,
+) -> State:
     mapping_final = merge_mappings(
         state["anchors"],
         state.get("mapping_heuristic", {}),
         state.get("mapping_llm", {}),
+        heuristic_threshold=heuristic_threshold,
+        llm_threshold=llm_threshold,
     )
     state["mapping_final"] = mapping_final
     write_report(artifacts_dir / "mapping_final.json", mapping_final)
@@ -226,6 +233,7 @@ def _report_node(state: State, artifacts_dir: Path) -> State:
 
     state["report"] = report
     write_report(artifacts_dir / "report.json", report)
+    write_text_report(artifacts_dir / "report.txt", report)
     write_report(artifacts_dir / "actions.json", state.get("actions", []))
     return state
 
@@ -239,6 +247,10 @@ def run_pipeline(
     dry_run: bool = False,
     strict: bool = False,
     heuristic_threshold: int = 90,
+    llm_threshold: float = 0.4,
+    repair_rounds: int = 1,
+    repair_heuristic_threshold: int = 80,
+    repair_llm_threshold: float = 0.25,
 ) -> Dict[str, Any]:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -261,7 +273,10 @@ def run_pipeline(
     graph.add_node("extract_anchors_node", lambda s: _extract_anchors_node(s, artifacts_dir))
     graph.add_node("heuristic_map_node", lambda s: _heuristic_map_node(s, artifacts_dir, heuristic_threshold))
     graph.add_node("llm_map_ambiguous_node", lambda s: _llm_map_ambiguous_node(s, artifacts_dir, model_name))
-    graph.add_node("validate_merge_node", lambda s: _validate_merge_node(s, artifacts_dir))
+    graph.add_node(
+        "validate_merge_node",
+        lambda s: _validate_merge_node(s, artifacts_dir, heuristic_threshold, llm_threshold),
+    )
     graph.add_node("fill_docx_node", lambda s: _fill_docx_node(s, artifacts_dir, dry_run))
     graph.add_node("report_node", lambda s: _report_node(s, artifacts_dir))
 
@@ -276,6 +291,20 @@ def run_pipeline(
 
     compiled = graph.compile()
     result = compiled.invoke(state)
+
+    for _ in range(max(0, int(repair_rounds))):
+        if not result.get("issues"):
+            break
+        _heuristic_map_node(result, artifacts_dir, threshold=repair_heuristic_threshold)
+        _llm_map_ambiguous_node(result, artifacts_dir, model_name)
+        _validate_merge_node(
+            result,
+            artifacts_dir,
+            heuristic_threshold=repair_heuristic_threshold,
+            llm_threshold=repair_llm_threshold,
+        )
+        _fill_docx_node(result, artifacts_dir, dry_run)
+        _report_node(result, artifacts_dir)
 
     if strict and result.get("issues"):
         raise SystemExit(2)
