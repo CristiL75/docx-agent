@@ -52,7 +52,13 @@ def _extract_anchors_node(state: State, artifacts_dir: Path) -> State:
     containers = list(iter_text_containers(doc))
     anchors = extract_anchors(containers, doc)
     state["anchors"] = anchors
-    anchors_report = [{k: v for k, v in a.items() if k != "container"} for a in anchors]
+    anchors_report = []
+    for a in anchors:
+        cleaned = {k: v for k, v in a.items() if k != "container"}
+        options = cleaned.get("options")
+        if isinstance(options, list):
+            cleaned["options"] = [{kk: vv for kk, vv in opt.items() if kk != "container"} for opt in options]
+        anchors_report.append(cleaned)
     write_report(artifacts_dir / "anchors.json", anchors_report)
     return state
 
