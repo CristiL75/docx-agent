@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, END
 from src.docx_io.traverse import iter_text_containers
 from src.docx_io.anchors import extract_anchors
 from src.docx_io.fill_text import fill_text_container
-from src.docx_io.fill_checkboxes import fill_checkboxes_in_container
+from src.docx_io.fill_checkboxes import fill_checkboxes_in_container, fill_checkbox_groups
 from src.docx_io.fill_tables import fill_tables
 from src.data.normalize import normalize_key, load_json, normalize_data
 from src.llm.hf_model import HFModel
@@ -74,6 +74,7 @@ def _llm_map_ambiguous_node(state: State, artifacts_dir: Path, model_name: str) 
             "mapping_heuristic": composite.get("mapping_heuristic", {}),
             "mapping_llm": composite.get("mapping_llm", {}),
             "mapping_final": composite.get("mapping_final", {}),
+            "mapping_stats": composite.get("mapping_stats", {}),
         }
     )
     write_report(artifacts_dir / "mapping_heuristic.json", state.get("mapping_heuristic", {}))
@@ -162,8 +163,19 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
             value = normalized_data.get(normalize_key(key))
             if value is None:
                 continue
-            if isinstance(value, list) and any(isinstance(v, dict) for v in value):
+            if isinstance(value, (list, dict)):
                 continue
+            if isinstance(value, str):
+                lower_label = str(label).lower()
+                match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", value)
+                if match and any(tok in lower_label for tok in ("ziua", "luna", "anul")):
+                    yyyy, mm, dd = match.group(1), match.group(2), match.group(3)
+                    if "ziua" in lower_label:
+                        value = dd
+                    elif "luna" in lower_label:
+                        value = mm
+                    elif "anul" in lower_label:
+                        value = yyyy
             if fill_text_container(
                 anchor["_container"],
                 placeholder_span["start"],
@@ -180,6 +192,7 @@ def _fill_docx_node(state: State, artifacts_dir: Path, dry_run: bool) -> State:
     }
 
     checkbox_filled = 0
+    checkbox_filled += fill_checkbox_groups(state.get("anchors", []), state["data_norm"], label_mapping)
     for container in iter_text_containers(doc):
         filled_here = fill_checkboxes_in_container(container, state["data_norm"], label_mapping)
         checkbox_filled += filled_here
@@ -244,6 +257,8 @@ def _report_node(state: State, artifacts_dir: Path) -> State:
         mapping_summary=mapping_summary,
         actions_counts=action_counts,
     )
+    report["conflicts_found"] = int(state.get("mapping_stats", {}).get("conflicts_found", 0))
+    report["repairs_made"] = int(state.get("mapping_stats", {}).get("repairs_made", 0))
 
     state["report"] = report
     write_report(artifacts_dir / "report.json", report)

@@ -117,6 +117,31 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
     anchors: List[Dict[str, object]] = []
     anchor_id = 1
     prev_text: Optional[str] = None
+    checkbox_group: List[Dict[str, object]] = []
+    checkbox_group_text: List[str] = []
+    checkbox_group_location: Optional[Location] = None
+
+    def _flush_checkbox_group() -> None:
+        nonlocal anchor_id, checkbox_group, checkbox_group_text, checkbox_group_location
+        if not checkbox_group:
+            return
+        label = "\n".join(checkbox_group_text).strip()
+        anchors.append(
+            {
+                "anchor_id": f"A{anchor_id}",
+                "label_text": label,
+                "nearby_text": label[:200],
+                "placeholder_span": None,
+                "location": _location_to_dict(checkbox_group_location) if checkbox_group_location else {},
+                "kind": "checkbox_group",
+                "options": checkbox_group,
+                "container": checkbox_group[0].get("container"),
+            }
+        )
+        anchor_id += 1
+        checkbox_group = []
+        checkbox_group_text = []
+        checkbox_group_location = None
 
     for container in containers:
         paragraph_text, _ = _concat_runs(container)
@@ -124,6 +149,36 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
         if not text:
             prev_text = None
             continue
+
+        if CHECKBOX_RE.search(text):
+            if not checkbox_group:
+                checkbox_group_location = container.location
+            checkbox_group_text.append(text.strip())
+            for start, end, line in _line_spans(text):
+                if not CHECKBOX_RE.search(line):
+                    continue
+                spans = _find_checkbox_spans(line)
+                option_text = (
+                    line.replace("|_|", "")
+                    .replace("[ ]", "")
+                    .replace("[x]", "")
+                    .replace("[X]", "")
+                    .replace("☐", "")
+                    .replace("☑", "")
+                    .strip()
+                )
+                for s, e in spans:
+                    checkbox_group.append(
+                        {
+                            "text": option_text,
+                            "span": {"start": start + s, "end": start + e},
+                            "container": container,
+                        }
+                    )
+            prev_text = text
+            continue
+        else:
+            _flush_checkbox_group()
 
         placeholder_spans = _find_placeholder_spans(text)
         for start, end, placeholder in placeholder_spans:
@@ -157,43 +212,8 @@ def extract_anchors(containers: List[TextContainer], doc: Document) -> List[Dict
             )
             anchor_id += 1
 
-        if CHECKBOX_RE.search(text):
-            options: List[Dict[str, object]] = []
-            for start, end, line in _line_spans(text):
-                if not CHECKBOX_RE.search(line):
-                    continue
-                spans = _find_checkbox_spans(line)
-                option_text = (
-                    line.replace("|_|", "")
-                    .replace("[ ]", "")
-                    .replace("[x]", "")
-                    .replace("[X]", "")
-                    .replace("☐", "")
-                    .replace("☑", "")
-                    .strip()
-                )
-                for s, e in spans:
-                    options.append(
-                        {
-                            "text": option_text,
-                            "span": {"start": start + s, "end": start + e},
-                        }
-                    )
-
-            anchors.append(
-                {
-                    "anchor_id": f"A{anchor_id}",
-                    "label_text": text.strip(),
-                    "nearby_text": text[:200],
-                    "placeholder_span": None,
-                    "location": _location_to_dict(container.location),
-                    "kind": "checkbox_group",
-                    "options": options,
-                    "container": container,
-                }
-            )
-            anchor_id += 1
-
         prev_text = text
+
+    _flush_checkbox_group()
 
     return anchors
